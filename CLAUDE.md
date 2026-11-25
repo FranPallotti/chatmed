@@ -45,7 +45,7 @@ Same PDFs + same question in two different sessions must give the same facts and
 - Python 3.12, `uv` for dependencies, FastAPI + Uvicorn (async), Pydantic v2.
 - Azure OpenAI (deployed in a Microsoft Foundry project) via `openai.AsyncAzureOpenAI`.
 - DuckDB (in-memory, per session). `pypdfium2` for digital PDFs and page rendering; Tesseract 5
-  (`pytesseract`) for scans (D10). No PyMuPDF (AGPL).
+  for scans, called over stdin/stdout without `pytesseract` (D10, D11). No PyMuPDF (AGPL).
   Azure Document Intelligence as an optional parser backend (bytes in, delete result right after).
 - Tenant DB: PostgreSQL, **one database per tenant** (`tenant_acme`, `tenant_globex`), read-only role
   `chatmed_reader_{tenant}` per tenant, async `psycopg`. Local: `docker compose up -d`. Schema in `db/schema/`.

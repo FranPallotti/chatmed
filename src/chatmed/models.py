@@ -15,4 +15,4 @@ class ParsedPage:
 class ParsedDocument:
     sha256: str  # hash of the original PDF bytes
     pages: tuple[ParsedPage, ...]
-    parser_id: str  # e.g. "pymupdf-1.24" or "docintel-layout-2024-11-30"
+    parser_id: str  # e.g. "routing[pdfium-5.15.2+tesseract-5.4.0-dpi300-eng-psm3]"

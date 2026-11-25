@@ -29,6 +29,10 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 - `DocIntelParser` (optional): sends bytes directly (no blob upload), fetches the result,
   calls delete-analyze-result immediately.
 - `RoutingParser`: per page, text layer → pdfium, otherwise → configured OCR backend.
+  A page has a text layer if pdfium returns any non-whitespace text. Only image-only pages go to
+  OCR, copied into an in-memory sub-PDF; `parser_id` names the OCR backend only when it was used.
+- Tesseract runs over stdin/stdout (D11); pdfium calls hold a process-wide lock (not thread-safe).
+- `build_parser(settings)` picks the implementation at startup and checks Tesseract there.
 - `parser_id` records backend + version; it is part of the reproducibility fingerprint.
   The backend is fixed per deployment/tenant config, never per request.
 

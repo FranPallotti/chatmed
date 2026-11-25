@@ -15,7 +15,7 @@ Each acceptance criterion (AC) needs at least one test.
 - AC1 `scripts/make_fixtures.py` generates synthetic PDFs (fake patients): a digital lab report,
   a multi-page report with a repeated value (for conflict tests), and an image-only "scanned" PDF.
 - AC2 `DocumentParser` protocol, `PdfiumParser`, `TesseractOcrParser`, `RoutingParser` (D10).
-  Replace the `pymupdf` dependency with `pypdfium2` + `pytesseract`; config `PARSER=routing|pdfium`,
+  Replace the `pymupdf` dependency with `pypdfium2` (+ the Tesseract binary, D11); config `PARSER=routing|pdfium`,
   new settings `OCR_DPI` (default 300), `OCR_LANG` (default `eng`), `TESSERACT_CMD` (optional path),
   all listed in `.env.example`.
 - AC2b `parser_id` includes the pypdfium2 version, and for OCR pages the Tesseract version, DPI and

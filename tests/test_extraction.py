@@ -47,7 +47,7 @@ ROWS = [
 
 DOC = ParsedDocument(
     sha256="abc123",
-    parser_id="pymupdf-test",
+    parser_id="pdfium-test",
     pages=(
         ParsedPage(1, "Patient MRN: 00123\nCollected: 2026-11-02"),
         ParsedPage(2, "Hemoglobin   13.4 g/dL\nOther notes"),
