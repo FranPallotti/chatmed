@@ -1,0 +1,24 @@
+# Local tenant databases for development. Synthetic data only.
+# Start:  docker compose up -d      Reset: docker compose down -v && docker compose up -d
+services:
+  postgres:
+    image: postgres:17
+    container_name: chatmed-pg
+    environment:
+      POSTGRES_USER: chatmed_admin
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-admin_local_only}
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - chatmed-pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - ./db/schema:/db/schema:ro
+      - ./db/seed:/db/seed:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatmed_admin -d tenant_acme"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  chatmed-pgdata:

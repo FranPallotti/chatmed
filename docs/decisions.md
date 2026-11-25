@@ -50,3 +50,24 @@ Format: context → options → decision → why → consequences. Add new entri
 - **Decision:** one Azure Container App, Azure OpenAI in Foundry, PostgreSQL with synthetic tenants,
   Managed Identity, Key Vault, Application Insights with metadata only.
 - **Why:** deployable within the week; no Kubernetes.
+
+## D8. Tenant database layout
+- Options: one database per tenant · one schema per tenant · shared tables with a tenant_id column.
+- **Decision:** one database per tenant, same schema in each, selected by code from the session's
+  tenant via `TENANT_DB_DSN_TEMPLATE`. The application connects as read-only `chatmed_reader`.
+- **Why:** matches the problem statement ("a database per tenant"), gives the strongest isolation
+  (a query cannot cross tenants because the connection can't see other databases), and is simple to seed.
+- **Consequence:** one connection pool per tenant; schema changes must be applied to every tenant DB.
+
+## D9. Model and deployment
+- Options: non-reasoning model (gpt-4.1-mini) · reasoning model (gpt-5.x-mini).
+- **Decision:** gpt-4.1-mini, version 2025-04-14 (inference retirement 2027-04-14), deployment
+  `gpt-4.1-mini-chatmed`, type GlobalStandard, 30K TPM, in Foundry resource `chatmed-ai-67800`
+  (eastus2, project `chatmed`).
+- **Why:** reasoning models do not accept `temperature`, which D6 relies on; gpt-4.1-mini supports
+  temperature 0, seed and strict structured outputs, and is cheap and fast for extraction.
+- **Limitation:** the subscription has 0 DataZoneStandard quota, so the POC uses GlobalStandard
+  (requests may be processed in any Azure region). Acceptable for synthetic data only.
+  Production with real patient data: DataZoneStandard or regional Standard deployment.
+- **Consequence:** before 2027-04-14 the model must be replaced and re-validated with the
+  reproducibility tests.

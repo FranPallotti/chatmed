@@ -46,7 +46,8 @@ Same PDFs + same question in two different sessions must give the same facts and
 - Azure OpenAI (deployed in a Microsoft Foundry project) via `openai.AsyncAzureOpenAI`.
 - DuckDB (in-memory, per session). PyMuPDF for digital PDFs. Local OCR for scans.
   Azure Document Intelligence as an optional parser backend (bytes in, delete result right after).
-- Tenant DB: PostgreSQL for the POC (`asyncpg` or `psycopg` async), read-only role.
+- Tenant DB: PostgreSQL, **one database per tenant** (`tenant_acme`, `tenant_globex`), read-only role
+  `chatmed_reader`, async `psycopg`. Local: `docker compose up -d`. Schema in `db/schema/`.
 - Deploy: one Azure Container App, single replica. Telemetry: Application Insights via OpenTelemetry.
 
 ## Commands
@@ -75,7 +76,8 @@ src/chatmed/
 tests/
   contracts/        # tests every implementation of an interface must pass
   guardrails/       # no-persistence, no-content-in-logs, reproducibility
-fixtures/           # synthetic PDFs + tenant seed SQL
+fixtures/           # synthetic PDFs, recorded model responses
+db/                 # tenant DB schema + synthetic seeds (docker compose up -d)
 docs/               # architecture, decisions, milestones, open questions
 ```
 
