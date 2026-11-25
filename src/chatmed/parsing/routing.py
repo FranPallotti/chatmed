@@ -16,8 +16,8 @@ class RoutingParser:
     image-only pages are sent to OCR (as an in-memory sub-PDF), which keeps OCR cost down and
     means a digital-only document never depends on the OCR backend.
 
-    `parser_id` lists the OCR backend only when it was used, e.g.
-    `routing[pdfium-5.15.2]` or `routing[pdfium-5.15.2+tesseract-5.4.0-dpi300-eng-psm3]`.
+    `parser_id` lists the OCR backend only when it was used, e.g. `routing[pdfium-5.15.2]` or
+    `routing[pdfium-5.15.2+tesseract-5.4.0-lept1.84.1-dpi300-eng-psm3-data<sha12>]`.
     """
 
     def __init__(self, text: PdfiumParser, ocr: DocumentParser) -> None:

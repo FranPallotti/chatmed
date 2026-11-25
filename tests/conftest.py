@@ -43,8 +43,15 @@ class FakeDocIntelClient:
     For image-only pages (no text layer) it returns `scanned_text` for each page.
     """
 
-    def __init__(self, *, fail_on_result: bool = False, scanned_text: str = "OCR TEXT") -> None:
+    def __init__(
+        self,
+        *,
+        fail_on_result: bool = False,
+        fail_on_delete: bool = False,
+        scanned_text: str = "OCR TEXT",
+    ) -> None:
         self.fail_on_result = fail_on_result
+        self.fail_on_delete = fail_on_delete
         self.scanned_text = scanned_text
         self.calls: list[tuple[str, Any]] = []
         self._counter = 0
@@ -74,3 +81,5 @@ class FakeDocIntelClient:
 
     async def delete_analyze_result(self, model_id: str, result_id: str, **kwargs: Any) -> None:
         self.calls.append(("delete", result_id))
+        if self.fail_on_delete:
+            raise ConnectionError("delete failed")

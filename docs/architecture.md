@@ -34,6 +34,11 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 - Tesseract runs over stdin/stdout (D11); pdfium calls hold a process-wide lock (not thread-safe).
 - `build_parser(settings)` picks the implementation at startup and checks Tesseract there.
 - `parser_id` records backend + version; it is part of the reproducibility fingerprint.
+  For Tesseract it also records the Leptonica version and a hash of the `.traineddata` files used
+  (same Tesseract version can ship different models), e.g.
+  `tesseract-5.4.0-lept1.84.1-dpi300-eng-psm3-data<sha12>`.
+- Document Intelligence: if deleting the analyze result fails, `docintel_delete_failed` is logged
+  (doc sha256 only), the original error is kept, and a successful parse is turned into an error.
   The backend is fixed per deployment/tenant config, never per request.
 
 ### Extraction (`src/chatmed/extraction.py`, seeded)

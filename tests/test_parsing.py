@@ -4,7 +4,9 @@ missing Tesseract (AC2c) and the Document Intelligence backend with a fake clien
 from __future__ import annotations
 
 import hashlib
+import logging
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +23,12 @@ from chatmed.parsing import (
 )
 from chatmed.parsing.base import make_document
 from chatmed.parsing.pdfium import page_count, page_texts, render_page_pgm, subset_pdf
+from chatmed.parsing.tesseract_ocr import (
+    TesseractInstall,
+    _decode_ocr,
+    format_parser_id,
+    language_data_sha256,
+)
 from tests.conftest import FIXTURES, ROOT, FakeDocIntelClient, fixture_bytes
 
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -133,20 +141,53 @@ async def test_tesseract_reads_scanned_page(tesseract_cmd: str) -> None:
 # ---------------------------------------------------------------- AC2b: parser_id
 
 
-async def test_tesseract_parser_id_has_version_dpi_lang(tesseract_cmd: str) -> None:
+async def test_tesseract_parser_id_has_engine_and_settings(tesseract_cmd: str) -> None:
     parser = TesseractOcrParser(dpi=300, lang="eng", cmd=tesseract_cmd)
-    version = await parser.ensure_available()
-    assert parser.parser_id == f"tesseract-{version}-dpi300-eng-psm3"
-    assert version[0].isdigit()
+    install = await parser.ensure_available()
+    assert install.version[0].isdigit() and install.leptonica[0].isdigit()
+    assert len(install.data_sha256) == 64
+    assert parser.parser_id == (
+        f"tesseract-{install.version}-lept{install.leptonica}"
+        f"-dpi300-eng-psm3-data{install.data_sha256[:12]}"
+    )
 
 
-def test_parser_id_changes_with_dpi_and_lang() -> None:
-    ids = set()
-    for dpi, lang in [(300, "eng"), (200, "eng"), (300, "eng+spa")]:
-        parser = TesseractOcrParser(dpi=dpi, lang=lang, cmd="tesseract")
-        parser._version = "5.4.0"  # no binary needed to check the format
-        ids.add(parser.parser_id)
-    assert len(ids) == 3
+INSTALL = TesseractInstall(version="5.4.0", leptonica="1.84.1", data_sha256="a" * 64)
+
+
+def test_parser_id_changes_with_every_input() -> None:
+    variants = [
+        (INSTALL, 300, "eng"),
+        (INSTALL, 200, "eng"),
+        (INSTALL, 300, "eng+spa"),
+        (TesseractInstall("5.3.0", "1.84.1", "a" * 64), 300, "eng"),
+        (TesseractInstall("5.4.0", "1.82.0", "a" * 64), 300, "eng"),
+        (TesseractInstall("5.4.0", "1.84.1", "b" * 64), 300, "eng"),  # other traineddata
+    ]
+    ids = {format_parser_id(install, dpi=dpi, lang=lang) for install, dpi, lang in variants}
+    assert len(ids) == len(variants)
+
+
+def test_language_data_hash_tracks_file_contents_and_order(tmp_path: Path) -> None:
+    a, b = tmp_path / "a", tmp_path / "b"
+    for folder, eng in [(a, b"model-1"), (b, b"model-2")]:
+        folder.mkdir()
+        (folder / "eng.traineddata").write_bytes(eng)
+        (folder / "spa.traineddata").write_bytes(b"spanish")
+    assert language_data_sha256(a, ["eng"]) == language_data_sha256(a, ["eng"])
+    assert language_data_sha256(a, ["eng"]) != language_data_sha256(b, ["eng"])
+    assert language_data_sha256(a, ["eng", "spa"]) != language_data_sha256(a, ["spa", "eng"])
+    with pytest.raises(TesseractNotAvailable):
+        language_data_sha256(a, ["fra"])
+
+
+def test_ocr_decode_error_does_not_carry_text() -> None:
+    raw = b"Hemoglobin 13.4 \xff"
+    with pytest.raises(ParserError) as info:
+        _decode_ocr(raw)
+    error = info.value
+    assert "13.4" not in str(error)
+    assert error.__cause__ is None and error.__context__ is None  # no UnicodeDecodeError.object
 
 
 def test_pdfium_parser_id_has_library_version() -> None:
@@ -246,6 +287,27 @@ async def test_docintel_deletes_result_even_when_reading_fails() -> None:
     with pytest.raises(RuntimeError):
         await DocIntelParser(client).parse(fixture_bytes("lab_report.pdf"))
     assert client.calls[-1] == ("delete", "op-1")
+
+
+async def test_docintel_failed_delete_keeps_original_error_and_logs_metadata(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = FakeDocIntelClient(fail_on_result=True, fail_on_delete=True)
+    pdf = fixture_bytes("lab_report.pdf")
+    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError, match="service error"):
+        await DocIntelParser(client).parse(pdf)
+    (record,) = [r for r in caplog.records if r.msg == "docintel_delete_failed"]
+    assert record.doc_sha256 == hashlib.sha256(pdf).hexdigest()  # type: ignore[attr-defined]
+    assert record.status == "result_may_persist"  # type: ignore[attr-defined]
+
+
+async def test_docintel_failed_delete_after_success_fails_the_parse(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = FakeDocIntelClient(fail_on_delete=True)
+    with caplog.at_level(logging.WARNING), pytest.raises(ParserError, match="could not be deleted"):
+        await DocIntelParser(client).parse(fixture_bytes("lab_report.pdf"))
+    assert [r.msg for r in caplog.records] == ["docintel_delete_failed"]
 
 
 def test_docintel_rejects_missing_pages() -> None:
