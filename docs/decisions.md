@@ -54,10 +54,16 @@ Format: context → options → decision → why → consequences. Add new entri
 ## D8. Tenant database layout
 - Options: one database per tenant · one schema per tenant · shared tables with a tenant_id column.
 - **Decision:** one database per tenant, same schema in each, selected by code from the session's
-  tenant via `TENANT_DB_DSN_TEMPLATE`. The application connects as read-only `chatmed_reader`.
-- **Why:** matches the problem statement ("a database per tenant"), gives the strongest isolation
-  (a query cannot cross tenants because the connection can't see other databases), and is simple to seed.
-- **Consequence:** one connection pool per tenant; schema changes must be applied to every tenant DB.
+  tenant via `TENANT_DB_DSN_TEMPLATE`. Each tenant has its own read-only role
+  (`chatmed_reader_{tenant}`) with CONNECT only on its own database; CONNECT is revoked from PUBLIC
+  on every tenant database and on `postgres`.
+- **Why:** matches the problem statement ("a database per tenant") and gives defense in depth:
+  isolation is enforced by code (rule 5: the tenant comes from the session, never the model) **and**
+  by Postgres (if code ever picked the wrong database, the connection is refused). Verified locally:
+  `chatmed_reader_acme` gets "no CONNECT privilege" on `tenant_globex` and `postgres`.
+- **Consequence:** one connection pool and one credential per tenant; schema changes must be applied
+  to every tenant DB. In Azure, per-tenant roles map to per-tenant Entra identities (M5).
+- **Local secrets:** passwords live in `db/.env` (gitignored), never in compose or SQL files.
 
 ## D9. Model and deployment
 - Options: non-reasoning model (gpt-4.1-mini) · reasoning model (gpt-5.x-mini).

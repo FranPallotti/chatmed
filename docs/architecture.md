@@ -51,7 +51,8 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
   remaining copy unreadable.
 
 ### Tenant DB (`src/chatmed/tenant_db/`)
-- Read-only role. Repository functions take `tenant_id` from the session, never from the model.
+- One read-only role per tenant (`chatmed_reader_{tenant}`), which can only connect to its own
+  database (D8). Repository functions take `tenant_id` from the session, never from the model.
 - Agent tools are parameterized queries for main paths.
 - Restricted SQL tool (optional): SELECT only, allow-listed tables/views, tenant filter enforced,
   row limit, timeout. Parsed/validated before execution (e.g. `sqlglot`).
@@ -71,6 +72,16 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 - `POST /sessions/{id}/ask` → streamed answer with citations
 - `DELETE /sessions/{id}` → wipe
 - Request-body logging disabled. Upload size and page limits enforced.
+
+### Logging (`src/chatmed/logconfig.py`)
+- `configure_logging()` installs one JSON handler on the root logger with `MetadataOnlyFilter`.
+- Log calls use a fixed event name as the message (`log.info("doc_parsed", extra={...})`).
+  Free-text messages (f-strings, third-party prose) are replaced by `unstructured_message`;
+  `%s` args are never rendered; `extra` keys outside `ALLOWED_FIELDS` and non-scalar or long
+  values are dropped; exceptions keep only their type and code locations.
+- The filter only sees records that reach its handler. Loggers with their own handlers
+  (uvicorn) and extra handlers (OpenTelemetry) must be routed through it or get their own filter
+  (to do in M3/M5).
 
 ## Reproducibility
 

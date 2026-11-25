@@ -52,10 +52,7 @@ CREATE TABLE reference_ranges (
     high      NUMERIC(10,3)
 );
 
--- Read-only access for the application role.
-DO $$ BEGIN
-    EXECUTE format('GRANT CONNECT ON DATABASE %I TO chatmed_reader', current_database());
-END $$;
-GRANT USAGE ON SCHEMA public TO chatmed_reader;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO chatmed_reader;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO chatmed_reader;
+-- Read-only access for this tenant's role (passed in by db/init/01_tenants.sh as :reader).
+GRANT USAGE ON SCHEMA public TO :"reader";
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO :"reader";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO :"reader";

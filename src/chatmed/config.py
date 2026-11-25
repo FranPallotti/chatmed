@@ -8,6 +8,7 @@ There are deliberately no API-key fields: auth is Entra ID via DefaultAzureCrede
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import Literal, Self
 from urllib.parse import urlsplit
@@ -16,6 +17,9 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 TENANT_PLACEHOLDER = "{tenant}"
+# libpq accepts a password as URL userinfo, as a `?password=` query parameter, or as a
+# `password=` keyword in key/value DSNs; the regex covers the last two.
+_DSN_PASSWORD_PARAM = re.compile(r"(^|[\s?&])password\s*=", re.IGNORECASE)
 
 
 class Settings(BaseSettings):
@@ -50,7 +54,7 @@ class Settings(BaseSettings):
     duckdb_memory_limit: str = "1GB"
 
     # Tenant DB (D8): one database per tenant, chosen by code from the session's tenant.
-    # Read-only role; no password in the DSN (Entra token in Azure, PGPASSWORD locally).
+    # Read-only role; no password in the DSN (Entra token in Azure, PGPASSWORD env locally).
     tenant_db_dsn_template: str
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
@@ -67,7 +71,8 @@ class Settings(BaseSettings):
         """Tenant comes from the session (rule 5); no secrets in config (rule 7)."""
         if TENANT_PLACEHOLDER not in self.tenant_db_dsn_template:
             raise ValueError(f"TENANT_DB_DSN_TEMPLATE must contain {TENANT_PLACEHOLDER}")
-        if urlsplit(self.tenant_db_dsn_template).password:
+        dsn = self.tenant_db_dsn_template
+        if _DSN_PASSWORD_PARAM.search(dsn) or ("://" in dsn and urlsplit(dsn).password):
             raise ValueError("TENANT_DB_DSN_TEMPLATE must not contain a password")
         return self
 

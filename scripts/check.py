@@ -33,13 +33,21 @@ FORBIDDEN: list[tuple[str, str]] = [
 ]
 
 
+# scripts/ may print (they are CLI tools), but every other rule applies to them too.
+SCRIPT_EXEMPT = {"Use the metadata-only logger, not print"}
+
+
 def guard() -> list[str]:
     problems = []
-    for path in sorted(SRC.rglob("*.py")):
+    files = [(p, False) for p in sorted(SRC.rglob("*.py"))]
+    files += [(p, True) for p in sorted((ROOT / "scripts").rglob("*.py")) if p.name != "check.py"]
+    for path, is_script in files:
         for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if "# guard: allow" in line:  # explicit, reviewable exception
                 continue
             for pattern, reason in FORBIDDEN:
+                if is_script and reason in SCRIPT_EXEMPT:
+                    continue
                 if re.search(pattern, line):
                     rel = path.relative_to(ROOT)
                     problems.append(f"{rel}:{n}: {reason}\n    {line.strip()}")

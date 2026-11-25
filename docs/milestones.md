@@ -36,6 +36,10 @@ Each acceptance criterion (AC) needs at least one test.
 - AC4 Fallback for questions not covered by fields: page text (BM25 for large docs).
 - AC5 FastAPI endpoints from `docs/architecture.md`, upload limits enforced, request-body logging off.
 - AC6 Tests with a fake model client: a scripted tool-call sequence produces the expected answer.
+- AC7 Every log path goes through the metadata-only filter: uvicorn's own loggers (run with
+  `log_config=None` or route `uvicorn.error`/`uvicorn.access` to our handler), and uncaught
+  exceptions (`sys.excepthook`, FastAPI exception handlers). A test raises an exception whose
+  message contains document text and proves it doesn't reach any log output.
 
 ## M4 — Session lifecycle and guardrails on
 - AC1 `InMemorySessionStore`: TTL sweeper, idempotent `close()` releasing DuckDB and documents.
