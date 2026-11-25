@@ -47,7 +47,7 @@ Same PDFs + same question in two different sessions must give the same facts and
 - DuckDB (in-memory, per session). PyMuPDF for digital PDFs. Local OCR for scans.
   Azure Document Intelligence as an optional parser backend (bytes in, delete result right after).
 - Tenant DB: PostgreSQL, **one database per tenant** (`tenant_acme`, `tenant_globex`), read-only role
-  `chatmed_reader`, async `psycopg`. Local: `docker compose up -d`. Schema in `db/schema/`.
+  `chatmed_reader_{tenant}` per tenant, async `psycopg`. Local: `docker compose up -d`. Schema in `db/schema/`.
 - Deploy: one Azure Container App, single replica. Telemetry: Application Insights via OpenTelemetry.
 
 ## Commands
@@ -67,6 +67,7 @@ uv run uvicorn chatmed.api:app --reload   # once M3+ exists
 src/chatmed/
   models.py         # shared dataclasses (ParsedDocument, ParsedPage, ...)
   config.py         # settings from env (pydantic-settings)
+  logconfig.py      # metadata-only logging: event names + allow-listed fields (rule 2)
   parsing/          # DocumentParser interface + pymupdf / local_ocr / docintel / routing
   extraction.py     # metadata -> JSON schema -> LLM -> verified facts -> DuckDB  (seeded, see M2)
   session/          # SessionStore interface + in-memory implementation (+ encrypted later)

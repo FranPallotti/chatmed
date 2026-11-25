@@ -14,7 +14,8 @@ Same PDFs + same question → same facts and values.
 
 ## Local setup
 1. `uv sync`
-2. `docker compose up -d` — starts PostgreSQL with two synthetic tenants (`tenant_acme`, `tenant_globex`).
+2. Copy `db/.env.example` to `db/.env` and set the passwords. Then `docker compose up -d` — starts
+   PostgreSQL with two synthetic tenants (`tenant_acme`, `tenant_globex`), each with its own read-only role.
    Reset with `docker compose down -v && docker compose up -d`.
 3. Copy `.env.example` to `.env` and fill the Azure values. Run `az login` (no API keys are used).
 4. `uv run python scripts/check.py`

@@ -15,7 +15,7 @@ ENV_EXAMPLE = Path(__file__).resolve().parent.parent / ".env.example"
 REQUIRED = {
     "AZURE_OPENAI_ENDPOINT": "https://example.openai.azure.com/",
     "AZURE_OPENAI_DEPLOYMENT": "gpt-test-pinned",
-    "TENANT_DB_DSN_TEMPLATE": "postgresql://chatmed_reader@localhost:5432/tenant_{tenant}",
+    "TENANT_DB_DSN_TEMPLATE": "postgresql://chatmed_reader_{tenant}@localhost:5432/tenant_{tenant}",
 }
 
 
@@ -85,10 +85,20 @@ def test_env_example_loads_as_valid_settings(env: pytest.MonkeyPatch) -> None:
     "template",
     [
         "postgresql://chatmed_reader@localhost:5432/tenants",  # no {tenant}: model could pick
-        "postgresql://chatmed_reader:pw@localhost:5432/tenant_{tenant}",  # secret in config
+        "postgresql://chatmed_reader:pw@localhost:5432/tenant_{tenant}",  # secret in userinfo
+        "postgresql://chatmed_reader@localhost:5432/tenant_{tenant}?password=pw",  # in query
+        "postgresql://chatmed_reader@localhost/tenant_{tenant}?sslmode=require&Password=pw",
+        "host=localhost user=chatmed_reader password=pw dbname=tenant_{tenant}",  # keyword DSN
     ],
 )
 def test_unsafe_tenant_dsn_template_fails(env: pytest.MonkeyPatch, template: str) -> None:
     env.setenv("TENANT_DB_DSN_TEMPLATE", template)
     with pytest.raises(ValidationError, match="TENANT_DB_DSN_TEMPLATE"):
         load()
+
+
+def test_keyword_dsn_without_password_is_accepted(env: pytest.MonkeyPatch) -> None:
+    """`passfile=` must not be mistaken for a password."""
+    template = "host=localhost user=chatmed_reader passfile=/x dbname=tenant_{tenant}"
+    env.setenv("TENANT_DB_DSN_TEMPLATE", template)
+    assert load().tenant_db_dsn_template == template

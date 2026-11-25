@@ -1,4 +1,5 @@
 # Local tenant databases for development. Synthetic data only.
+# First time: copy db/.env.example to db/.env and set the passwords (db/.env is gitignored).
 # Start:  docker compose up -d      Reset: docker compose down -v && docker compose up -d
 services:
   postgres:
@@ -6,8 +7,9 @@ services:
     container_name: chatmed-pg
     environment:
       POSTGRES_USER: chatmed_admin
-      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-admin_local_only}
       POSTGRES_DB: postgres
+    env_file:
+      - db/.env   # POSTGRES_PASSWORD, CHATMED_READER_PASSWORD (no secrets in this file)
     ports:
       - "5432:5432"
     volumes:
