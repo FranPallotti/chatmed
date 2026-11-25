@@ -1,0 +1,86 @@
+# Architecture
+
+## Flow
+
+```
+User/UI ──upload PDF──► Parser (local / OCR / Doc Intelligence)
+                            │ ParsedDocument (in memory)
+                            ▼
+                     Field extractor ── reads field metadata ──► Tenant DB (read-only)
+                     (LLM, strict schema, temp 0, seed)
+                            │ verified Facts
+                            ▼
+                     Session DuckDB (:memory:)
+                            ▲
+User/UI ──question──► Agent loop ──tools──► facts query / tenant DB tools / restricted SQL
+                            │
+                            └── stateless calls ──► Azure OpenAI (Foundry deployment)
+
+Everything inside the session lives in process memory and is wiped on close/TTL.
+```
+
+## Components
+
+### Parsing (`src/chatmed/parsing/`)
+- `DocumentParser` interface → `ParsedDocument(sha256, pages, parser_id)`.
+- `PyMuPdfParser`: digital PDFs, local, deterministic.
+- `LocalOcrParser`: pages without a text layer (scans), local, deterministic.
+- `DocIntelParser` (optional): sends bytes directly (no blob upload), fetches the result,
+  calls delete-analyze-result immediately.
+- `RoutingParser`: per page, text layer → PyMuPDF, otherwise → configured OCR backend.
+- `parser_id` records backend + version; it is part of the reproducibility fingerprint.
+  The backend is fixed per deployment/tenant config, never per request.
+
+### Extraction (`src/chatmed/extraction.py`, seeded)
+- Tenant `field_definitions` → strict JSON schema (sorted keys, schema hash).
+- Each field returns `{value, evidence{page, quote}}` or nulls.
+- Code validates types (Decimal/ISO date parsed in code) and grounds quotes against page text.
+- Statuses: `ok`, `missing`, `unverified`, `invalid`, `conflict`.
+- Large documents: deterministic page windows; merge rules: single-value → one verified value
+  or `conflict`; multiple → union, dedupe, page order.
+- Facts go into the session DuckDB table `facts` (long format; joins to DB via `join_target`).
+
+### Session (`src/chatmed/session/`)
+- `SessionStore` interface. POC: `InMemorySessionStore` (dict, TTL sweeper, explicit wipe).
+- Each session owns: tenant id, documents, a DuckDB `:memory:` connection, chat history.
+- DuckDB settings per connection: in-memory only, no spilling to disk
+  (set `temp_directory` to an empty value and verify with the no-persistence guardrail test;
+  keep `memory_limit` within container RAM and fail clearly if exceeded).
+- Later (only if time / needed): `EncryptedBlobSessionStore` with **crypto-shredding**:
+  per-session AES-256 key held only in memory; dropping the key on close makes any
+  remaining copy unreadable.
+
+### Tenant DB (`src/chatmed/tenant_db/`)
+- Read-only role. Repository functions take `tenant_id` from the session, never from the model.
+- Agent tools are parameterized queries for main paths.
+- Restricted SQL tool (optional): SELECT only, allow-listed tables/views, tenant filter enforced,
+  row limit, timeout. Parsed/validated before execution (e.g. `sqlglot`).
+
+### Agent (`src/chatmed/agent/`)
+- Code-first loop with function calling over stateless chat completions
+  (no Agent Service threads, no `store=True`).
+- Tools: `query_document_facts`, `get_field_metadata`, tenant DB tools, optional `restricted_sql`.
+- Fallback for free-text questions not covered by fields: pass relevant page text
+  (small docs: whole text; large docs: in-memory BM25 over pages, ties broken by page number).
+- Answers: values come from tool results; the model formats them; every claim carries a citation.
+- Max iterations, per-call timeout, retries with exponential backoff + jitter on 429/5xx.
+
+### API (`src/chatmed/api.py`)
+- `POST /sessions` → session id
+- `POST /sessions/{id}/documents` (multipart PDF + doc_type) → document sha256 + extraction summary
+- `POST /sessions/{id}/ask` → streamed answer with citations
+- `DELETE /sessions/{id}` → wipe
+- Request-body logging disabled. Upload size and page limits enforced.
+
+## Reproducibility
+
+Fingerprint = sha256(doc) + parser_id + tenant + doc_type + schema_hash + deployment +
+PROMPT_VERSION + seed. Contains no document content.
+Optional drift check: store only HMAC(secret, question) and HMAC(secret, answer facts) with the
+fingerprint (keyed hash because short answers are guessable). Requires legal OK.
+
+## Deployment (POC)
+
+One Azure Container App (single replica) · Azure OpenAI deployment in a Foundry project ·
+PostgreSQL with synthetic tenants · Managed Identity · Key Vault for the HMAC secret ·
+Application Insights (metadata only).
