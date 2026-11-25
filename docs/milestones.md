@@ -14,7 +14,15 @@ Each acceptance criterion (AC) needs at least one test.
 ## M1 — Parsing + synthetic fixtures
 - AC1 `scripts/make_fixtures.py` generates synthetic PDFs (fake patients): a digital lab report,
   a multi-page report with a repeated value (for conflict tests), and an image-only "scanned" PDF.
-- AC2 `DocumentParser` protocol, `PyMuPdfParser`, `LocalOcrParser`, `RoutingParser`.
+- AC2 `DocumentParser` protocol, `PdfiumParser`, `TesseractOcrParser`, `RoutingParser` (D10).
+  Replace the `pymupdf` dependency with `pypdfium2` + `pytesseract`; config `PARSER=routing|pdfium`,
+  new settings `OCR_DPI` (default 300), `OCR_LANG` (default `eng`), `TESSERACT_CMD` (optional path),
+  all listed in `.env.example`.
+- AC2b `parser_id` includes the pypdfium2 version, and for OCR pages the Tesseract version, DPI and
+  language, so any change shows up in the reproducibility fingerprint.
+- AC2c If the Tesseract binary is missing, scanned pages fail with a clear error at startup or on
+  first use (never silently return empty text). Tests that need Tesseract are skipped with a reason
+  when it isn't installed; everything else runs.
 - AC3 Same bytes → identical `ParsedDocument` across runs (contract test for every parser).
 - AC4 Pages ordered and 1-based; `sha256` computed on the original bytes; `parser_id` set.
 - AC5 `DocIntelParser` implemented behind config, sends bytes directly, deletes the analyze

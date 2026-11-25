@@ -23,11 +23,12 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 
 ### Parsing (`src/chatmed/parsing/`)
 - `DocumentParser` interface → `ParsedDocument(sha256, pages, parser_id)`.
-- `PyMuPdfParser`: digital PDFs, local, deterministic.
-- `LocalOcrParser`: pages without a text layer (scans), local, deterministic.
+- `PdfiumParser`: digital PDFs via `pypdfium2`, local, deterministic.
+- `TesseractOcrParser`: pages without a text layer: render with pypdfium2 at a fixed DPI, OCR with
+  Tesseract (fixed language and config), local, deterministic.
 - `DocIntelParser` (optional): sends bytes directly (no blob upload), fetches the result,
   calls delete-analyze-result immediately.
-- `RoutingParser`: per page, text layer → PyMuPDF, otherwise → configured OCR backend.
+- `RoutingParser`: per page, text layer → pdfium, otherwise → configured OCR backend.
 - `parser_id` records backend + version; it is part of the reproducibility fingerprint.
   The backend is fixed per deployment/tenant config, never per request.
 

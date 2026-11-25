@@ -77,3 +77,20 @@ Format: context → options → decision → why → consequences. Add new entri
   Production with real patient data: DataZoneStandard or regional Standard deployment.
 - **Consequence:** before 2027-04-14 the model must be replaced and re-validated with the
   reproducibility tests.
+
+## D10. PDF text extraction and OCR
+- Options: PyMuPDF · pypdfium2 · pdfplumber (text); Tesseract · RapidOCR · Document Intelligence (OCR).
+- **Decision:** `pypdfium2` for the text layer and for rendering pages to images; Tesseract 5 via
+  `pytesseract` for pages without a text layer; Document Intelligence stays an optional backend (D1).
+- **Why (measured on a synthetic lab report, 2 vCPU / 8 GB):**
+  - pypdfium2 extracted every line correctly and also renders pages, so one library covers both needs.
+    License BSD-3/Apache-2.0. PyMuPDF is AGPL (strong obligations for a company product) and its
+    current version pulls in onnxruntime.
+  - Tesseract at 300 DPI: every line correct, ~2.2 s/page, 3 runs byte-identical, ~290 MB peak.
+    License Apache-2.0.
+  - RapidOCR: ~29 s/page and the process was killed for memory on the second page. Rejected.
+- **Consequences:** Tesseract is a system binary: install it locally (Windows:
+  `winget install -e --id UB-Mannheim.TesseractOCR`) and in the Docker image (`apt-get install
+  tesseract-ocr`, M5). Its version, DPI and language go into `parser_id`. Tables come out as plain
+  lines; if real samples need table structure, use the Document Intelligence backend.
+
