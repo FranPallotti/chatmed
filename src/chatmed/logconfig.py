@@ -1,13 +1,19 @@
 """Central logging that can only emit allow-listed metadata (hard rule 2).
 
 Why a filter and not just discipline: one careless call that passes page text as `extra`,
-or that logs an exception whose message embeds document text, would leak patient data
-into App Insights. So the handler cleans every record before any formatter or
-exporter sees it:
+formats it into the message, or logs an exception whose message embeds document text,
+would leak patient data into App Insights. So the handler cleans every record it handles:
 
-- messages are treated as fixed event names: `args` are dropped, so `"%s" % text` never renders;
+- messages must be fixed event names (`doc_parsed`, `extraction.window_done`); anything else,
+  including f-strings and third-party prose, is replaced by `UNSTRUCTURED_EVENT`;
+  `args` are dropped, so `"%s" % text` never renders;
 - `extra` attributes not in `ALLOWED_FIELDS` are removed; allowed ones must be small scalars;
 - exception messages are dropped; only the exception type and code locations are kept.
+
+Limits: the filter only sees records that reach this handler. Loggers with their own
+handlers and `propagate=False` (uvicorn's, for one) bypass it, and the filter mutates the
+record, so other handlers on the same logger only see a clean record if they run after this
+one. Any extra handler (e.g. OpenTelemetry) must get its own `MetadataOnlyFilter`.
 
 Named `logconfig` (not `logging`) so it never shadows the standard library module.
 """
@@ -16,7 +22,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import re
 import sys
 import traceback
 from datetime import UTC, datetime
@@ -43,6 +51,8 @@ ALLOWED_FIELDS: frozenset[str] = frozenset(
     }
 )
 MAX_STR_LEN = 128
+EVENT_NAME = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
+UNSTRUCTURED_EVENT = "unstructured_message"
 
 # Attributes every LogRecord has; anything else on a record came from `extra=`.
 _STANDARD_ATTRS: frozenset[str] = frozenset(
@@ -51,7 +61,9 @@ _STANDARD_ATTRS: frozenset[str] = frozenset(
 
 
 def _is_safe_value(value: Any) -> bool:
-    if isinstance(value, bool | int | float) or value is None:
+    if isinstance(value, float):
+        return math.isfinite(value)  # NaN/inf would make the JSON line invalid
+    if isinstance(value, bool | int) or value is None:
         return True
     return isinstance(value, str) and len(value) <= MAX_STR_LEN
 
@@ -73,7 +85,8 @@ class MetadataOnlyFilter(logging.Filter):
         record.exc_info = None
         record.exc_text = None
         record.stack_info = None
-        record.msg = str(record.msg)
+        msg = record.msg if isinstance(record.msg, str) else ""
+        record.msg = msg if EVENT_NAME.fullmatch(msg) else UNSTRUCTURED_EVENT
         record.args = None
         for key in [k for k in record.__dict__ if k not in _STANDARD_ATTRS]:
             if key not in ALLOWED_FIELDS or not _is_safe_value(record.__dict__[key]):
