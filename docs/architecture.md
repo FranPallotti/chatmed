@@ -50,7 +50,8 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 - Tenant `field_definitions` → strict JSON schema (sorted keys, schema hash).
 - Each field returns `{value, evidence{page, quote}}` or nulls.
 - Code validates types (Decimal/ISO date parsed in code) and grounds quotes against page text.
-- Statuses: `ok`, `missing`, `unverified`, `invalid`, `conflict`.
+- Statuses: `ok`, `missing`, `unverified`, `invalid`, `conflict`, `undeterminable` (checkbox
+  fields with no explicit text statement, D13). Subject join (code, D13): `joined` / `unmatched` / `ambiguous`.
 - Large documents: deterministic page windows; merge rules: single-value → one verified value
   or `conflict`; multiple → union, dedupe, page order.
 - Facts go into the session DuckDB table `facts` (long format; joins to DB via `join_target`).

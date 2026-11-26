@@ -34,6 +34,11 @@ FROM document_types d,
 ) AS f(key, label, description, data_type, required, multiple, allowed_values, unit, join_target, sort_order)
 WHERE d.code = 'cioms';
 
+-- Fields whose value is a tick mark on the form: OCR text alone can't tell if they're checked (D13).
+UPDATE field_definitions SET checkbox = TRUE
+WHERE key IN ('patient_died','hospitalisation','disability','life_threatening',
+              'dechallenge','rechallenge','report_type');
+
 INSERT INTO adsl (studyid, usubjid, subjid, siteid, age, sex, country, arm, trt01a, trtsdt, trtedt, saffl) VALUES
   ('ACM-101', 'ACM-101-01001-001', '01001-001', '01001', 54, 'F', 'ARG', 'Zentrobal 20 mg', 'Zentrobal 20 mg', '2026-03-02', '2026-08-30', 'Y'),
   ('ACM-101', 'ACM-101-01001-002', '01001-002', '01001', 61, 'M', 'ARG', 'Placebo',         'Placebo',         '2026-03-05', '2026-09-01', 'Y'),

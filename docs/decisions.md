@@ -127,3 +127,29 @@ Format: context → options → decision → why → consequences. Add new entri
   `tests/guardrails/test_no_real_samples.py`, `.gitignore`.
 - **If cleared:** drop the real files in `samples/`, add a local loader for the SAS datasets into the
   tenant DB, and run the same pipeline. No redesign.
+
+## D13. What OCR on the real CIOMS showed, and how extraction handles it
+- **Evidence:** the developer ran `scripts/ocr_check.py` locally on the data provider's real scanned
+  CIOMS (D12: content not shared). Text was recovered well and deterministically, with three issues:
+  1. The subject id on the form carries a prefix before the SUBJID (pattern `NNN-SSSSS-SSS`, where
+     the SUBJID is `SSSSS-SSS`).
+  2. Checkbox states are lost: tick marks come out as nothing or as noise characters, e.g. a box
+     marked with an X was not detected at all.
+  3. Two-column boxes are interleaved line by line, so a label and its value can be split by text
+     from the neighbouring box.
+- **Decision:**
+  1. **Subject join in code, not by the model.** `subject_id` is extracted as written. Code
+     normalizes separators (any run of non-alphanumerics → `-`) and matches it against
+     `adsl.subjid` as an exact value or as a suffix after a separator. Exactly one match → joined;
+     none → `unmatched`; more than one → `ambiguous`. No fuzzy matching.
+  2. **Checkbox fields** (`field_definitions.checkbox = TRUE`) are filled only from an explicit text
+     statement that passes grounding (e.g. "patient was hospitalised"). Tick marks are never
+     inferred from OCR text; otherwise the status is `undeterminable` and the agent says the form
+     must be checked visually. Reading tick marks is a separate capability: Document Intelligence
+     selection marks (optional backend, needs D12 clearance for real data) or a local checkbox
+     detector (stretch).
+  3. **OCR-aware prompt:** the extraction prompt states that text may be interleaved across columns
+     and contain OCR noise, and that quotes must be short verbatim fragments from one place.
+- **Why:** a wrong "hospitalised: no" on a safety report is worse than "not determinable"; the
+  join decides which subject's data the agent combines, so it must be deterministic and testable.
+

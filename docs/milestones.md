@@ -65,6 +65,19 @@ The tenant databases now hold synthetic CDISC-style ADSL/ADAE data and CIOMS I f
 - AC3 Retries with exponential backoff + jitter on 429/5xx, per-call timeout; content never logged.
 - AC4 Recorded-response tests: a fake client returns fixed JSON → facts and statuses as expected.
 - AC5 One opt-in integration test (marked `azure`, skipped by default) against a real deployment.
+- AC6 (D13) Fixtures mirror the real form: the subject id is printed with a prefix
+  (`Subject ID 101-01001-004`); checkboxes are drawn as graphics with an X (never as text) in both
+  the digital and scanned CIOMS; the narrative states "The patient was hospitalised on 2026-06-13"
+  so `hospitalisation` has a text source while `dechallenge`, `rechallenge` and `report_type` do not.
+  Update `fixtures/README.md` accordingly.
+- AC7 (D13) Subject join in code: normalization + exact-or-suffix match against `adsl.subjid`;
+  statuses `joined` / `unmatched` / `ambiguous`; tests for prefix, changed separators, no match,
+  two matches.
+- AC8 (D13) Checkbox fields: new fact status `undeterminable`; a checkbox field is `ok` only with a
+  grounded explicit text statement, otherwise `undeterminable` (never `missing`, never guessed).
+  Field metadata loading includes `checkbox`. Tests: hospitalisation `ok` from the narrative;
+  dechallenge `undeterminable` on both CIOMS fixtures.
+- AC9 (D13) Extraction prompt mentions column interleaving and OCR noise; prompt version bumped.
 
 ## M3 — Agent loop and API
 - AC1 Tools: `query_document_facts` (read-only over session DuckDB), `get_field_metadata`,
@@ -99,6 +112,8 @@ The tenant databases now hold synthetic CDISC-style ADSL/ADAE data and CIOMS I f
 - AC5 `docs/demo.md`: demo script, including showing that a second session gives the same answer.
 
 ## Stretch (only if time)
+- Read checkbox states (D13): Document Intelligence selection marks, or a local detector that finds
+  the boxes on the rendered page and measures their fill.
 - Encrypted blob session store with crypto-shredding (must pass the session store contract tests).
 - Self-consistency extraction (k runs, per-field majority).
 - Automatic document-type classification limited to the tenant's types.
