@@ -405,6 +405,22 @@ def test_number_check(text: str, bad: list[str]) -> None:
     assert unsupported_numbers(text, items) == bad
 
 
+@pytest.mark.parametrize(
+    ("text", "bad"),
+    [
+        ("Onset 12/06/2026.", []),  # repeated as written: the ambiguity stays visible
+        ("Onset 12.06.2026.", []),
+        ("Onset 2026-06-12.", ["2026-06-12"]),  # the source does not decide 12 June ...
+        ("Onset 2026-12-06.", ["2026-12-06"]),  # ... nor 6 December
+        ("Onset 6 December 2026.", ["6 December 2026"]),
+        ("Stop 2026-06-25.", []),  # 25/06/2026 has one reading only
+    ],
+)
+def test_ambiguous_source_date_supports_no_reading(text: str, bad: list[str]) -> None:
+    items = [_item({"quote": "Onset 12/06/2026"}), _item({"quote": "Stop 25/06/2026"})]
+    assert unsupported_numbers(text, items) == bad
+
+
 # ---------------------------------------------------------------- AC4: statuses stated plainly
 
 
@@ -418,6 +434,14 @@ def test_number_check(text: str, bad: list[str]) -> None:
         ("Without any conflict.", ["conflict"]),
         ("No conflict on page 1, but there is a conflict on page 2.", []),
         ("The conflictless report.", ["conflict"]),  # whole words only
+        ("The dates are conflict-free.", ["conflict"]),
+        ("The values are non-conflicting.", ["conflict"]),
+        ("There is no evidence of any conflict.", ["conflict"]),  # negation far back
+        ("No real sign of a conflict here.", ["conflict"]),
+        ("There isn't really any conflict.", ["conflict"]),
+        ("The onset is free of conflict.", ["conflict"]),
+        ("No onset change, and there is a conflict in the outcome.", []),
+        ("The onset matches and there is a conflict in the outcome.", []),
     ],
 )
 def test_negated_status_is_not_stated(text: str, unstated: list[str]) -> None:
@@ -432,6 +456,12 @@ def test_not_comparable_is_stated_despite_its_own_not() -> None:
         "(status: not_comparable)",
     ):
         assert unstated_statuses(text, [item]) == [], text
+    both = [item, _item({"status": "missing"})]
+    for text in (
+        "The outcome is not comparable because it is missing.",  # "not" of the status name
+        "The outcome is not comparable; it is missing.",
+    ):
+        assert unstated_statuses(text, both) == [], text
     assert unstated_statuses("Action taken cannot be compared.", [item]) == ["not_comparable"]
 
 
@@ -561,6 +591,64 @@ async def test_answer_fingerprint_is_stable_and_versioned(
     fallback = await ask(setup, ScriptedModelClient([final("x", ["nope"])] * 2), "Arm?")
     assert (fallback.outcome, fallback.reason) == ("fallback", "unknown_cited_id")
     assert fallback.fingerprint is None
+
+
+async def test_fingerprint_covers_the_session_history(recorded: FakeModelClient) -> None:
+    """Earlier turns are sent with the question, so they are part of the fingerprint."""
+    prints = []
+    for first in ("Anything?", "Anything else?", "Anything?"):
+        setup = await setup_session(recorded, ["cioms_initial.pdf"])
+        sha = setup.shas["cioms_initial.pdf"]
+        await ask(setup, ScriptedModelClient([final("No.", [])]), first)
+        answer = await ask(setup, ScriptedModelClient(arm_script(sha)), "Arm?")
+        prints.append(answer.fingerprint)
+    assert prints[0] == prints[2] != prints[1]
+
+
+async def test_fingerprint_covers_the_tenant_data_read(recorded: FakeModelClient) -> None:
+    """Same schema, same documents, changed adsl row: a different fingerprint."""
+    setup = await setup_session(recorded, ["cioms_initial.pdf"])
+    sha = setup.shas["cioms_initial.pdf"]
+    before = await ask(setup, ScriptedModelClient(arm_script(sha)), "Arm?")
+    original = setup.repo.subject
+
+    async def changed_subject(subjid: str) -> dict[str, Any] | None:
+        row = await original(subjid)
+        return {**row, "saffl": "N"} if row else None
+
+    setup = await setup_session(recorded, ["cioms_initial.pdf"])
+    setup.repo.subject = changed_subject  # type: ignore[method-assign]
+    after = await ask(setup, ScriptedModelClient(arm_script(sha)), "Arm?")
+    assert before.outcome == after.outcome == "verified"
+    assert before.fingerprint != after.fingerprint
+
+
+async def test_fingerprint_covers_every_adae_row_reconcile_read(
+    recorded: FakeModelClient,
+) -> None:
+    """reconcile_case reads all of the subject's events to pick one; all of them count."""
+    prints = []
+    for edit in (False, True):
+        setup = await setup_session(recorded, ["cioms_initial.pdf"])
+        if edit:
+            for row in setup.repo.adae:
+                if row["aeseq"] != 2:  # not the record the reconciliation selects
+                    row["extra"] = "changed"
+        sha = setup.shas["cioms_initial.pdf"]
+        answer = await ask(setup, ScriptedModelClient(reconcile_script(sha)), "Match?")
+        assert answer.outcome == "verified"
+        prints.append((ids(answer), answer.fingerprint))
+    assert prints[0][0] == prints[1][0] and prints[0][1] != prints[1][1]
+
+
+async def test_fingerprint_names_the_tenant_without_documents(recorded: FakeModelClient) -> None:
+    prints = []
+    for tenant in ("acme", "globex"):
+        setup = await setup_session(recorded, [], tenant=tenant)
+        prints.append(
+            (await ask(setup, ScriptedModelClient([final("No.", [])]), "Hi?")).fingerprint
+        )
+    assert None not in prints and prints[0] != prints[1]
 
 
 async def _arm_fingerprint(recorded: FakeModelClient, **settings: Any) -> str | None:

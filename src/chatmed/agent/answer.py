@@ -146,46 +146,83 @@ def _supported(readings: list[Reading], allowed: set[tuple[int, int, int]]) -> b
     return False
 
 
+def _numeric_form(written: str) -> tuple[int, int, int] | None:
+    """(first, second, year) of a numeric date such as "12/06/2026", whatever the separator."""
+    match = _NUMERIC_DATE.fullmatch(written)
+    return (int(match[1]), int(match[2]), int(match[3])) if match else None
+
+
 def unsupported_numbers(text: str, items: list[EvidenceItem]) -> list[str]:
     """Dates and numbers in `text` that are not values or citations of `items` (AC3).
 
     Dates are compared as dates, whatever format the text writes them in, so "June 6, 2026"
     is not supported by 2026-06-12 even though 6 and 2026 occur in it. Identifiers (document
     sha prefixes, row keys) are not sources: "7652" is not supported by doc `7652ea457661`.
+
+    A source date only supports a date when it has one reading. An ambiguous source such as
+    "12/06/2026" (12 June or 6 December) decides neither, so the text may repeat it as
+    written (12/06/2026 or 12.06.2026) but may not state either reading as a resolved date.
+    The text's own numeric dates may be read either way: one supported reading is enough.
     """
     sources = " ".join(s for it in items for s in _strings([it.values, it.citation]))
     source_dates, _ = written_dates(sources)
     allowed_dates = {
-        (y, m, d) for _, readings in source_dates for y, m, d in readings if y is not None
+        (y, m, d)
+        for _, readings in source_dates
+        if len(readings) == 1
+        for y, m, d in readings
+        if y is not None
     }
+    allowed_forms = {form for written, _ in source_dates if (form := _numeric_form(written))}
     allowed_tokens = set(re.findall(r"\d+(?:[.,]\d+)?", sources))
     allowed_decimals = {d for t in allowed_tokens if (d := _as_decimal(t)) is not None}
     dates, rest = written_dates(text)
-    bad = sorted({written for written, r in dates if not _supported(r, allowed_dates)})
+    bad = sorted(
+        {
+            written
+            for written, r in dates
+            if not _supported(r, allowed_dates) and _numeric_form(written) not in allowed_forms
+        }
+    )
     for n in sorted(set(_NUMBER.findall(rest))):
         if n not in allowed_tokens and _as_decimal(n) not in allowed_decimals:
             bad.append(n)
     return bad
 
 
-# A status counts as stated only if it is not negated in its clause ("no conflict").
+# A status counts as stated only if no negation comes before it in its clause ("no conflict",
+# "no evidence of any conflict"). Any word ending in "n't" is a negation too. Erring this way
+# costs a retry; erring the other way would hide a status (AC4).
 _NEGATIONS = frozenset(
     {
-        "no", "not", "never", "without", "nor", "neither", "none", "isn't", "aren't",
-        "wasn't", "weren't", "doesn't", "don't", "didn't", "hasn't", "haven't", "cannot",
+        "no", "not", "never", "without", "nor", "neither", "none", "nothing", "cannot",
+        "absence", "absent", "lack", "lacks", "lacking", "free", "zero", "instead", "rather",
     }
 )  # fmt: skip
-_CLAUSE_BREAK = re.compile(r"[.,;:!?()\n]|\bbut\b")
-_NEGATION_WINDOW = 3  # words before the status, within its clause
+_CLAUSE_BREAK = re.compile(
+    r"[.,;:!?()\n–—]"
+    r"|\b(?:but|and|or|so|because|since|while|whereas|although|though|however)\b"
+)
+# Statuses whose own name starts with "not": blanked before looking for negations, so that
+# "not comparable because it is missing" still states `missing`.
+_NOT_STATUSES = re.compile(r"\bnot[ _](?:comparable|attempted)\b")
+
+
+def _status_pattern(status: str) -> re.Pattern[str]:
+    """The status as a whole word, plural or -ing allowed; a hyphen on either side makes it a
+    different word ("conflict-free", "non-conflicting" do not state `conflict`)."""
+    return re.compile(r"(?<![\w-])" + status.replace("_", "[ _]") + r"(?:s|ing)?(?![\w-])")
+
+
+def _negated(clause: str) -> bool:
+    words = re.findall(r"[a-z']+", _NOT_STATUSES.sub(" ", clause))
+    return any(w in _NEGATIONS or w.endswith("n't") for w in words)
 
 
 def _states(text: str, status: str) -> bool:
-    """True if `text` names `status` at least once without a negation just before it."""
-    pattern = re.compile(r"\b" + status.replace("_", "[ _]") + r"(?:s|ing)?\b")
-    for match in pattern.finditer(text):
-        clause = _CLAUSE_BREAK.split(text[: match.start()])[-1]
-        before = re.findall(r"[a-z']+", clause)[-_NEGATION_WINDOW:]
-        if not _NEGATIONS.intersection(before):
+    """True if `text` names `status` at least once with no negation before it in its clause."""
+    for match in _status_pattern(status).finditer(text):
+        if not _negated(_CLAUSE_BREAK.split(text[: match.start()])[-1]):
             return True
     return False
 
@@ -202,8 +239,9 @@ def _status_words(item: EvidenceItem) -> set[str]:
 def unstated_statuses(text: str, items: list[EvidenceItem]) -> list[str]:
     """Honesty statuses of cited rows that the text does not state (AC4).
 
-    Whole words only ("missing", not "dismissing"; "conflicting" counts), and a negated
-    mention ("there is no conflict", "is not missing") does not count as stating it.
+    Whole words only ("missing", not "dismissing" or "conflict-free"; "conflicting" counts),
+    and a negated mention ("there is no conflict", "no evidence of any conflict", "is not
+    missing") does not count as stating it.
     """
     lowered = text.casefold().replace("’", "'")
     return sorted({w for it in items for w in _status_words(it) if not _states(lowered, w)})

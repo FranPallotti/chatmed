@@ -9,6 +9,7 @@ Errors go back to the model as short codes (`ToolError.code`), never with docume
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import date
@@ -65,6 +66,9 @@ class ToolContext:
     bm25_top_k: int
     evidence: dict[str, EvidenceItem] = field(default_factory=dict)
     pages: dict[str, tuple[str, int, str]] = field(default_factory=dict)  # page id -> sha, n, text
+    # tenant read (call and arguments) -> sha256 of what it returned; enters the answer
+    # fingerprint, because tenant study data can change between sessions (D14)
+    tenant_reads: dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------- helpers
@@ -77,6 +81,12 @@ def _plain(value: Any) -> Any:
     if isinstance(value, Decimal):
         return format(value.normalize(), "f")
     return value
+
+
+def _note_read(ctx: ToolContext, call: str, result: Any) -> None:
+    """Remember a digest of one tenant DB read: the data it returned, never the data itself."""
+    payload = json.dumps(result, sort_keys=True, ensure_ascii=False, default=str)
+    ctx.tenant_reads[call] = hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _register(ctx: ToolContext, item: EvidenceItem) -> dict[str, Any]:
@@ -177,6 +187,7 @@ async def get_field_metadata(ctx: ToolContext, doc_type: str) -> dict[str, Any]:
         schema = await ctx.repo.field_schema(doc_type)
     except UnknownDocumentType:
         raise ToolError("unknown_document_type") from None
+    _note_read(ctx, f"field_schema:{doc_type}", schema.schema_hash)
     rows = []
     for f in schema.fields:
         item = EvidenceItem(
@@ -211,14 +222,18 @@ def _adae_item(row: dict[str, Any]) -> EvidenceItem:
 
 
 async def get_subject(ctx: ToolContext, subjid: str) -> dict[str, Any]:
-    row = await ctx.repo.subject(_require_joined(ctx, subjid))
+    joined = _require_joined(ctx, subjid)
+    row = await ctx.repo.subject(joined)
+    _note_read(ctx, f"subject:{joined}", row)
     if row is None:
         raise ToolError("subject_not_found")
     return {"rows": [_register(ctx, _adsl_item(row))]}
 
 
 async def list_adverse_events(ctx: ToolContext, subjid: str, serious_only: bool) -> dict[str, Any]:
-    rows = await ctx.repo.adverse_events(_require_joined(ctx, subjid), serious_only)
+    joined = _require_joined(ctx, subjid)
+    rows = await ctx.repo.adverse_events(joined, serious_only)
+    _note_read(ctx, f"adverse_events:{joined}:{serious_only}", rows)
     return {"rows": [_register(ctx, _adae_item(r)) for r in rows]}
 
 
@@ -250,6 +265,8 @@ async def reconcile_case(ctx: ToolContext, doc_sha: str) -> dict[str, Any]:
     facts = _facts(ctx, sha, None)
     subjid = subject_is_joined(facts)
     ae_rows = await ctx.repo.adverse_events(subjid, False) if subjid else []
+    if subjid:
+        _note_read(ctx, f"adverse_events:{subjid}:False", ae_rows)
     result = reconcile(facts, ae_rows)
     # The joined subject_id fact the reconciliation rests on, with the same id that
     # query_document_facts gives it (numbered before filtering): always part of the

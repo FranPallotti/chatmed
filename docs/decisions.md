@@ -85,7 +85,8 @@ Format: context → options → decision → why → consequences. Add new entri
     `OPERATIONAL_SETTINGS`, and `tests/test_config.py` fails unless every `Settings` field is
     in exactly one. Fingerprint settings can change facts for the same inputs and go into
     both fingerprints by value (`name=value`, sorted by name; `config.fingerprint_settings`),
-    the extraction fingerprint of each document and the answer fingerprint (rules-5): model endpoint, deployment, API version, seed,
+    the extraction fingerprint of each document and the answer fingerprint (rules-5): model
+    endpoint, deployment, API version, seed,
     `EXTRACTION_MAX_CHARS` (extraction windows), `AGENT_FULLTEXT_MAX_CHARS`,
     `AGENT_BM25_TOP_K`, the parser settings (`PARSER`, `OCR_BACKEND`, `OCR_DPI`, `OCR_LANG`,
     also in `parser_id`) and `TENANT_DB_DSN_TEMPLATE` (which databases the data comes from).
@@ -308,12 +309,23 @@ Approved by the project owner with the M3 plan.
     `June 12, 2026`, `12/06/2026` read both day- and month-first; month-name dates without a
     year match on month and day). A written date that is not a real date is rejected. Before,
     "June 6, 2026" passed against 2026-06-12 because 6 and 2026 occurred in it.
+  - On the source side (`facts_used` values and quotes) a date supports only its one reading
+    (rules-6). An ambiguous source such as `12/06/2026` (12 June or 6 December) supports no
+    resolved date: the text may repeat it as written (`12/06/2026`, `12.06.2026`) but not
+    state 2026-06-12 or 2026-12-06. The text's own numeric dates may still be read either way
+    against unambiguous sources.
   - Identifiers are not number sources: the `doc` sha prefix and the citation `key`/`table`
     are skipped, so digits of a sha (`7652ea457661`) cannot support "7652".
-  - A status counts as stated only as a whole word (plural/`-ing` allowed) that is not negated
-    by `no`, `not`, `never`, `without`, ... within the 3 words before it in the same clause
-    ("there is no conflict" does not state `conflict`). The `not` of `not comparable` is part
-    of the status, not a negation.
+  - A status counts as stated only as a whole word (plural/`-ing` allowed; a hyphen on either
+    side makes it another word, so "conflict-free" and "non-conflicting" do not count) with
+    no negation anywhere before it in the same clause (rules-6; before, only the 3 words
+    before it were checked, so "no evidence of any conflict" passed). Negations: `no`, `not`,
+    `never`, `without`, `none`, `nothing`, `absence`, `lack`, `free`, ..., and any word ending
+    in `n't`. Clauses end at punctuation, dashes and `but`/`and`/`or`/`so`/`because`/`since`/
+    `while`/`whereas`/`although`/`though`/`however`. The `not` of `not comparable` /
+    `not attempted` is part of the status, not a negation. This errs towards rejecting (a
+    retry) rather than towards hiding a status; it is a check on top of the prompt, which
+    asks for the status names verbatim.
 - **Question time limit:** `AGENT_QUESTION_TIMEOUT_SECONDS` (default 25 s, under the 30 s
   verified-answer target) covers the whole question: session context, every model call,
   retries with their backoff, and tools. When it runs out, the in-flight call is cancelled and
@@ -341,10 +353,19 @@ Approved by the project owner with the M3 plan.
   paraphrases (that would weaken AC4); `agent-v2` tells the model the names are checked
   verbatim, with that example. Reconciliation questions are answered from `reconcile_case`
   only. AC9 also requires first-attempt verification.
-- **Answer fingerprint and outcome (revised after the M3 review):** the fingerprint is the
+- **Answer fingerprint and outcome (revised after the M3 reviews):** the fingerprint is the
   sha256 of `AGENT_PROMPT_VERSION`, `RULES_VERSION`, every `FINGERPRINT_SETTINGS` value
-  (`name=value`, sorted by name) and the sorted extraction fingerprints of the session's
-  documents (D6). The extraction fingerprint holds the same settings values, next to the
+  (`name=value`, sorted by name), the session's tenant id, the sorted extraction
+  fingerprints of the session's documents (D6), and since rules-6:
+  - a sha256 of the session history sent with the question (earlier questions and answer
+    texts), because earlier turns steer which tools the model calls. So the claim holds per
+    conversation: the same question after the same earlier turns;
+  - a sha256 per tenant DB read the tools made (`field_schema`, `subject`, `adverse_events`,
+    keyed by call and arguments; for `reconcile_case`, all events of the subject it chose
+    from, not only the selected record), because tenant study data can change between
+    sessions while its schema hash stays the same. A tenant change the question does not
+    read leaves the fingerprint unchanged.
+  Only digests enter the fingerprint, never history text or tenant values. The extraction fingerprint holds the same settings values, next to the
   document sha256, `parser_id`, the tenant schema hash, `PROMPT_VERSION` and
   `RULES_VERSION`. Operational settings are not in it. The `answer` event carries
   `outcome: verified | fallback`; a fallback carries a fixed `reason` code (`max_iterations`,

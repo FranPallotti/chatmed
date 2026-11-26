@@ -46,21 +46,37 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def answer_fingerprint(ctx: ToolContext, settings: Settings) -> str:
+def _digest(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def answer_fingerprint(
+    ctx: ToolContext, settings: Settings, *, tenant_id: str, history: list[dict[str, Any]]
+) -> str:
     """Everything that should make the facts of a verified answer identical (D6, D14).
 
-    The agent prompt version, the rules version, every fingerprint setting by value (model
-    endpoint, deployment, API version, seed, window and retrieval sizes, parser settings,
-    tenant DB), and the extraction fingerprint of every document in the session (document
-    sha256, parser id, tenant schema hash, extraction prompt version). Operational settings
-    (limits, timeouts, retries) are not in it: they only decide whether an answer is verified.
-    No content.
+    - the agent prompt version, the rules version and every fingerprint setting by value
+      (model endpoint, deployment, API version, seed, window and retrieval sizes, parser
+      settings, tenant DB);
+    - the tenant, also for a session without documents;
+    - the extraction fingerprint of every document in the session (document sha256, parser
+      id, tenant schema hash, extraction prompt version);
+    - a digest of the session history sent with the question, because earlier turns steer
+      which tools the model calls;
+    - a digest of each tenant DB read the tools made (keyed by call and arguments), because
+      tenant study data can change between sessions while its schema stays the same.
+    Operational settings (limits, timeouts, retries) are not in it: they only decide whether an
+    answer is verified. Only sha256 digests of history and tenant data, never the data.
     """
     parts = [
         prompt.AGENT_PROMPT_VERSION,
         RULES_VERSION,
         *fingerprint_settings(settings),
+        f"tenant={tenant_id}",
         *sorted(d.fingerprint for d in ctx.documents),
+        f"history={_digest(history)}",
+        *(f"read={call}:{digest}" for call, digest in sorted(ctx.tenant_reads.items())),
     ]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
@@ -315,7 +331,10 @@ async def run_agent(
     if answer is None:  # every model call counts, rejected answers included
         answer = fallback_answer(ctx, "max_iterations")
     if answer.verified:  # only a verified answer claims reproducibility (D14)
-        answer = replace(answer, fingerprint=answer_fingerprint(ctx, settings))
+        fingerprint = answer_fingerprint(
+            ctx, settings, tenant_id=session.tenant_id, history=session.history
+        )
+        answer = replace(answer, fingerprint=fingerprint)
     session.history.extend(
         [{"role": "user", "content": question}, {"role": "assistant", "content": answer.text}]
     )

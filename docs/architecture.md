@@ -131,17 +131,19 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 - `answer.py`: the model ends with `{text, cited_ids, quotes}`. Code builds `facts_used` from the
   registry (values never come from the model), grounds quotes against the page text
   (`ground_quote`, stored as full lines, D13c), rejects text with numbers/dates not in
-  `facts_used` (dates compared as dates in any written form; sha prefixes and row keys are
-  not number sources), and rejects text that cites a row with an honesty status (`undeterminable`,
+  `facts_used` (dates compared as dates in any written form; an ambiguous source date such as
+  12/06/2026 supports no resolved reading; sha prefixes and row keys are not number sources),
+  and rejects text that cites a row with an honesty status (`undeterminable`,
   `conflict`, `unverified`, `missing`, `invalid`, `unmatched`, `ambiguous`, `not_attempted`,
-  `not_comparable`) without naming it (whole words; a negated mention such as "no conflict"
-  does not count). Output that is not exactly one JSON object (the real
+  `not_comparable`) without naming it (whole words, "conflict-free" is not one; a mention
+  with a negation earlier in its clause, such as "no evidence of any conflict", does not
+  count). Output that is not exactly one JSON object (the real
   model once sent two) is also a rejection. One retry, then a deterministic fallback listing
   the retrieved rows with their statuses. A cited `recon:` row brings in the whole
   reconciliation of its document, the compared `adae` record and the document's joined
   `subject_id` fact, which `reconcile_case` registers itself (D14). A verified answer carries
-  a fingerprint (agent prompt version, rules version, `FINGERPRINT_SETTINGS` values, document
-  fingerprints); a fallback carries outcome `fallback` and a reason code instead.
+  a fingerprint (agent prompt version, rules version, `FINGERPRINT_SETTINGS` values, tenant,
+  document fingerprints, and digests of the session history and of each tenant DB read); a fallback carries outcome `fallback` and a reason code instead.
 
 ### API (`src/chatmed/api.py`)
 - `POST /sessions {"tenant_id"}` → session id (tenant checked against `TENANTS`, D14)

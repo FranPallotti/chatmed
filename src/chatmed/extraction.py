@@ -53,7 +53,9 @@ PROMPT_VERSION = "extract-v2"  # v2 (D13): OCR noise, interleaved columns, check
 # rules-4: answer fingerprint over FINGERPRINT_SETTINGS values; outcome verified|fallback,
 #          fingerprint on verified answers only (D14)
 # rules-5: extraction fingerprint over FINGERPRINT_SETTINGS values too (D6)
-RULES_VERSION = "rules-5"
+# rules-6: answer fingerprint over tenant, history and tenant reads; stricter status
+#          negation; ambiguous source dates support no reading (D14)
+RULES_VERSION = "rules-6"
 
 
 class ExtractionError(RuntimeError):

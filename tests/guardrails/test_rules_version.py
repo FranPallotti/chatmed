@@ -52,6 +52,9 @@ RULES_HASHES = {
     "rules-4": "4cc2e314f976d1462aa088752958b99b7bc4b1099428683cf2ad99fb44c0d3df",
     # rules-5: extraction fingerprint over FINGERPRINT_SETTINGS values too (D6).
     "rules-5": "15c4628a6d5faa343e94690964dc53e5270eb04d03c44b10554d2585d9f89d64",
+    # rules-6: answer fingerprint over tenant, history and tenant reads; status negation over
+    # the whole clause, hyphenated words excluded; ambiguous source dates decide no reading.
+    "rules-6": "a282aba3734f1efd6ce94e8f5d14178749ec86c0a90cd07c347d14deb34ac303",
 }
 
 
