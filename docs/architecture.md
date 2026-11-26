@@ -37,6 +37,10 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
   For Tesseract it also records the Leptonica version and a hash of the `.traineddata` files used
   (same Tesseract version can ship different models), e.g.
   `tesseract-5.4.0-lept1.84.1-dpi300-eng-psm3-data<sha12>`.
+  The `.traineddata` directory is the first one holding every configured language among:
+  `TESSDATA_PREFIX` (or its `tessdata/`), the path printed by `tesseract --list-langs`
+  (Tesseract 5 only), then `/usr/share/tesseract-ocr/{5,4.00}/tessdata` and `/usr/share/tessdata`.
+  Works with Tesseract 4 and 5.
 - Document Intelligence: if deleting the analyze result fails, `docintel_delete_failed` is logged
   (doc sha256 only), the original error is kept, and a successful parse is turned into an error.
   The backend is fixed per deployment/tenant config, never per request.

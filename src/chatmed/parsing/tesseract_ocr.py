@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -22,8 +23,16 @@ PSM = 3  # Tesseract page segmentation mode: fully automatic, no OSD. Part of pa
 PAGE_TIMEOUT_S = 120.0
 DATA_HASH_LEN = 12  # hex chars of the language-data hash kept in parser_id
 
+_TESSERACT_VERSION = re.compile(r"^tesseract v?(\d\S*)", re.MULTILINE)
 _LEPTONICA = re.compile(r"leptonica-(\S+)")
 _TESSDATA_DIR = re.compile(r'"([^"]+)"')  # 'List of available languages in "<dir>" (n):'
+# Package locations on Debian/Ubuntu (the M5 image), newest first. Tesseract 4 does not print
+# its data directory, so these are needed there.
+SYSTEM_TESSDATA_DIRS = (
+    Path("/usr/share/tesseract-ocr/5/tessdata"),
+    Path("/usr/share/tesseract-ocr/4.00/tessdata"),
+    Path("/usr/share/tessdata"),
+)
 
 
 class TesseractNotAvailable(ParserError):
@@ -49,6 +58,27 @@ def format_parser_id(install: TesseractInstall, *, dpi: int, lang: str) -> str:
     return (
         f"tesseract-{install.version}-lept{install.leptonica}-dpi{dpi}-{lang}-psm{PSM}-data{data}"
     )
+
+
+def find_tessdata_dir(langs: list[str], *, listed: str | None, prefix: str | None) -> Path:
+    """Directory holding every `<lang>.traineddata`; first match wins, in this order:
+
+    1. `TESSDATA_PREFIX` (Tesseract reads it too): the directory itself or its `tessdata/`;
+    2. the directory `tesseract --list-langs` printed (Tesseract 5 does, 4 does not);
+    3. the standard Debian/Ubuntu package directories.
+
+    Fails loudly instead of fingerprinting the wrong models (AC2b) or none.
+    """
+    candidates: list[Path] = []
+    if prefix:
+        candidates += [Path(prefix), Path(prefix) / "tessdata"]
+    if listed:
+        candidates.append(Path(listed))
+    candidates += SYSTEM_TESSDATA_DIRS
+    for folder in candidates:
+        if all((folder / f"{lang}.traineddata").is_file() for lang in langs):
+            return folder
+    raise TesseractNotAvailable("cannot find the tesseract language data directory")
 
 
 def language_data_sha256(tessdata_dir: Path, langs: list[str]) -> str:
@@ -85,24 +115,25 @@ class TesseractOcrParser:
             return self.install
         if not self.cmd:
             raise TesseractNotAvailable("tesseract not found on PATH; set TESSERACT_CMD")
-        version_out = (await self._run(["--version"], b"")).decode("utf-8", "replace")
-        version = version_out.splitlines()[0].split()[-1].lstrip("v")  # "tesseract v5.4.0"
-        leptonica = _LEPTONICA.search(version_out)
-        if leptonica is None:
-            raise TesseractNotAvailable("cannot read the leptonica version from tesseract")
-
-        list_out = (await self._run(["--list-langs"], b"")).decode("utf-8", "replace")
-        header, *langs = list_out.splitlines()
-        missing = [lang for lang in self.lang.split("+") if lang not in langs]
+        # stderr is merged for these two calls only: some 4.x builds print there, and they
+        # carry no document content.
+        version_out = (await self._run(["--version"], b"", merge_stderr=True)).decode(
+            "utf-8", "replace"
+        )
+        version, leptonica = parse_version_output(version_out)
+        list_out = (await self._run(["--list-langs"], b"", merge_stderr=True)).decode(
+            "utf-8", "replace"
+        )
+        listed_dir, installed = parse_list_langs(list_out)
+        wanted = self.lang.split("+")
+        missing = [lang for lang in wanted if lang not in installed]
         if missing:
             raise TesseractNotAvailable(f"tesseract language data not installed: {missing}")
-        tessdata = _TESSDATA_DIR.search(header)
-        if tessdata is None:
-            raise TesseractNotAvailable("cannot find the tesseract language data directory")
-        data_sha = await asyncio.to_thread(
-            language_data_sha256, Path(tessdata.group(1)), self.lang.split("+")
+        tessdata = find_tessdata_dir(
+            wanted, listed=listed_dir, prefix=os.environ.get("TESSDATA_PREFIX")
         )
-        self.install = TesseractInstall(version, leptonica.group(1), data_sha)
+        data_sha = await asyncio.to_thread(language_data_sha256, tessdata, wanted)
+        self.install = TesseractInstall(version, leptonica, data_sha)
         return self.install
 
     async def parse(self, pdf_bytes: bytes) -> ParsedDocument:
@@ -115,7 +146,7 @@ class TesseractOcrParser:
             texts.append(normalize_text(_decode_ocr(await self._run(args, image))))
         return make_document(pdf_bytes, texts, self.parser_id)
 
-    async def _run(self, args: list[str], stdin: bytes) -> bytes:
+    async def _run(self, args: list[str], stdin: bytes, *, merge_stderr: bool = False) -> bytes:
         if self.cmd is None:
             raise TesseractNotAvailable("tesseract not found on PATH; set TESSERACT_CMD")
         try:
@@ -124,7 +155,7 @@ class TesseractOcrParser:
                 *args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.STDOUT if merge_stderr else asyncio.subprocess.DEVNULL,
             )
         except OSError as exc:
             raise TesseractNotAvailable(f"cannot start tesseract ({type(exc).__name__})") from None
@@ -137,6 +168,32 @@ class TesseractOcrParser:
         if proc.returncode != 0:
             raise ParserError(f"tesseract failed with exit code {proc.returncode}")
         return stdout
+
+
+def parse_version_output(output: str) -> tuple[str, str]:
+    """(tesseract version, leptonica version) from `tesseract --version`.
+
+    Tesseract 5 prints 'tesseract v5.4.0...', 4.x 'tesseract 4.1.1'; warnings may come first.
+    """
+    version = _TESSERACT_VERSION.search(output)
+    leptonica = _LEPTONICA.search(output)
+    if version is None or leptonica is None:
+        raise TesseractNotAvailable("cannot read the tesseract/leptonica version")
+    return version.group(1), leptonica.group(1)
+
+
+def parse_list_langs(output: str) -> tuple[str | None, list[str]]:
+    """(data directory if printed, installed languages) from `tesseract --list-langs`.
+
+    Tesseract 5: 'List of available languages in "<dir>" (n):'; 4.x: 'List of available
+    languages (n):'. Lines before the header (warnings) are ignored.
+    """
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    header = next((i for i, line in enumerate(lines) if line.startswith("List of")), None)
+    if header is None:
+        raise TesseractNotAvailable("unexpected output from tesseract --list-langs")
+    listed = _TESSDATA_DIR.search(lines[header])
+    return (listed.group(1) if listed else None), lines[header + 1 :]
 
 
 def _decode_ocr(raw: bytes) -> str:

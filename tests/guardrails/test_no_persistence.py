@@ -5,6 +5,7 @@ The pipeline module must expose:
                                *, model_client) -> str
 which creates a session, uploads, extracts, asks, closes, and returns the answer text.
 Tests use a fake model client (fixtures/recorded) so no network is needed.
+Input: the synthetic CIOMS form for acme subject 01001-004 (D12, fixtures/README.md).
 """
 
 from __future__ import annotations
@@ -15,6 +16,12 @@ import tempfile
 from pathlib import Path
 
 import pytest
+
+FIXTURE = "fixtures/cioms_initial.pdf"
+DOC_TYPE = "cioms"
+QUESTION = "What is the suspect drug for subject 01001-004?"
+# values present in the fixture PDF; none may appear in logs
+SECRET_MARKERS = ["01001-004", "Zentrobal", "ACM-2026-0042"]
 
 pipeline = pytest.importorskip("chatmed.pipeline", reason="enabled in M4")
 
@@ -39,9 +46,9 @@ async def test_full_run_writes_no_files(tmp_path, monkeypatch, fake_client):
     watched = [tmp_path, Path(tempfile.gettempdir())]
     before = _snapshot(watched)
     await pipeline.run_full_session(
-        [Path(os.environ.get("FIXTURE_PDF", "fixtures/lab_report.pdf")).resolve()],
-        "lab_report",
-        "What is the hemoglobin value?",
+        [Path(os.environ.get("FIXTURE_PDF", FIXTURE)).resolve()],
+        DOC_TYPE,
+        QUESTION,
         model_client=fake_client,
     )
     created = _snapshot(watched) - before
@@ -49,13 +56,12 @@ async def test_full_run_writes_no_files(tmp_path, monkeypatch, fake_client):
 
 
 async def test_logs_contain_no_document_content(caplog, fake_client):
-    secret_markers = ["Hemoglobin", "13.4", "00123"]  # values present in the fixture PDF
     with caplog.at_level(logging.DEBUG):
         await pipeline.run_full_session(
-            [Path("fixtures/lab_report.pdf").resolve()],
-            "lab_report",
-            "What is the hemoglobin value?",
+            [Path(FIXTURE).resolve()],
+            DOC_TYPE,
+            QUESTION,
             model_client=fake_client,
         )
-    leaked = [m for m in secret_markers for r in caplog.records if m in r.getMessage()]
+    leaked = [m for m in SECRET_MARKERS for r in caplog.records if m in r.getMessage()]
     assert not leaked, f"document content found in logs: {sorted(set(leaked))}"
