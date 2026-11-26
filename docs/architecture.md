@@ -122,7 +122,10 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 ## Reproducibility
 
 Fingerprint = sha256(doc) + parser_id + tenant + doc_type + schema_hash + deployment +
-PROMPT_VERSION + seed. Contains no document content.
+PROMPT_VERSION + RULES_VERSION + seed. Contains no document content.
+`schema_hash` covers every field attribute (including `checkbox` and `box_labels`);
+`RULES_VERSION` versions the code that turns model output into facts, and a guardrail test
+fails if that code changes without a bump (D6).
 Optional drift check: store only HMAC(secret, question) and HMAC(secret, answer facts) with the
 fingerprint (keyed hash because short answers are guessable). Requires legal OK.
 

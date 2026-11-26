@@ -492,10 +492,12 @@ def test_every_seeded_checkbox_field_has_box_labels() -> None:
             assert not f.checkbox or f.box_labels, f.key
 
 
-def test_box_labels_change_the_schema_hash() -> None:
+@pytest.mark.parametrize(("column", "value"), [("box_labels", ["died"]), ("checkbox", False)])
+def test_checkbox_metadata_changes_the_schema_hash(column: str, value: Any) -> None:
+    """schema_hash (part of the fingerprint, D6) covers every FieldDef attribute, these too."""
     rows = [dict(r) for r in ACME_CIOMS_ROWS]
     before = DocTypeSchema.from_rows("acme", "cioms", rows).schema_hash
-    next(r for r in rows if r["key"] == "patient_died")["box_labels"] = ["died"]
+    next(r for r in rows if r["key"] == "patient_died")[column] = value
     assert DocTypeSchema.from_rows("acme", "cioms", rows).schema_hash != before
 
 
@@ -516,11 +518,16 @@ def test_checkbox_fields_carry_the_hint_in_the_schema() -> None:
     assert "checkbox on the form" not in props["age"]["description"]
 
 
-def test_prompt_version_changes_the_fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("name", "value"), [("PROMPT_VERSION", "extract-v3"), ("RULES_VERSION", "rules-999")]
+)
+def test_versions_change_the_fingerprint(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
     doc = ParsedDocument("sha", (), "p")
     schema = DocTypeSchema.from_rows("acme", "cioms", ACME_CIOMS_ROWS)
     before = fingerprint(doc, schema, "d", 7)
-    monkeypatch.setattr("chatmed.extraction.PROMPT_VERSION", "extract-v3")
+    monkeypatch.setattr(f"chatmed.extraction.{name}", value)
     assert fingerprint(doc, schema, "d", 7) != before
 
 

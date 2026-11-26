@@ -41,6 +41,11 @@ if TYPE_CHECKING:  # keep the pure parts importable/testable without these at ru
 log = logging.getLogger(__name__)
 
 PROMPT_VERSION = "extract-v2"  # v2 (D13): OCR noise, interleaved columns, checkbox fields
+# Version of the code that turns model output into facts (grounding, checkbox rules, merge,
+# subject join). Part of the fingerprint (D6): the same model output can give different facts
+# under different rules. tests/guardrails/test_rules_version.py fails if this module changes
+# without a bump.
+RULES_VERSION = "rules-1"
 
 
 class ExtractionError(RuntimeError):
@@ -761,6 +766,7 @@ def fingerprint(doc: ParsedDocument, schema: DocTypeSchema, deployment: str, see
         schema.schema_hash,
         deployment,
         PROMPT_VERSION,
+        RULES_VERSION,
         str(seed),
     ]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
