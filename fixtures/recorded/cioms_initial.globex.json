@@ -1,0 +1,16 @@
+{
+  "_comment": "Hand-written model response: the acme form read with globex's smaller field set. The subject is not in globex's ADSL, so the join must be unmatched.",
+  "fixture": "cioms_initial.pdf",
+  "parser": "pdfium",
+  "doc_type": "cioms",
+  "response": {
+    "reaction_description": {"value": "acute liver injury, ALT 8x ULN", "evidence": {"page": 1, "quote": "Describe reaction(s): acute liver injury, ALT 8x ULN"}, "other_statements": []},
+    "reaction_onset_date": {"value": "2026-06-12", "evidence": {"page": 1, "quote": "4-6. Reaction onset: 2026-06-12"}, "other_statements": []},
+    "report_type": {"value": null, "evidence": null, "other_statements": []},
+    "serious": {"value": true, "evidence": {"page": 1, "quote": "The patient was hospitalised on 2026-06-13"}, "other_statements": []},
+    "subject_id": {"value": "101-01001-004", "evidence": {"page": 1, "quote": "Subject ID 101-01001-004"}, "other_statements": []},
+    "suspect_drug": [
+      {"value": "Zentrobal", "evidence": {"page": 1, "quote": "14. Suspect drug(s): Zentrobal"}}
+    ]
+  }
+}

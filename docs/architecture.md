@@ -48,12 +48,27 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 
 ### Extraction (`src/chatmed/extraction.py`, seeded)
 - Tenant `field_definitions` → strict JSON schema (sorted keys, schema hash).
-- Each field returns `{value, evidence{page, quote}}` or nulls.
+- Each field returns `{value, evidence{page, quote}}` or nulls. Multiple fields return a list;
+  single fields also return `other_statements` (other places stating a *different* value, e.g.
+  a correction on a later page), so a conflict inside one window is not lost.
 - Code validates types (Decimal/ISO date parsed in code) and grounds quotes against page text.
+  A grounded quote is stored as the full page line(s) it sits on, so the evidence does not
+  depend on how much of a line the model chose to quote (D13c).
 - Statuses: `ok`, `missing`, `unverified`, `invalid`, `conflict`, `undeterminable` (checkbox
-  fields with no explicit text statement, D13). Subject join (code, D13): `joined` / `unmatched` / `ambiguous`.
+  fields, D13/D13a/D13b: `ok` only from a grounded quote with words beyond the field's own
+  label/description/options that does not contain all words of one of its printed
+  `box_labels`; anything else is `undeterminable`, never `missing`).
+- Subject join (code, D13/D13a), only for `join_target = adsl.subjid`: normalized exact or
+  suffix match → `joined` / `unmatched` / `ambiguous`; only an `ok` subject id is joined
+  (`conflict` → `ambiguous`, otherwise `not_attempted`). Stored as `join_status`/`join_value`.
 - Large documents: deterministic page windows; merge rules: single-value → one verified value
-  or `conflict`; multiple → union, dedupe, page order.
+  or `conflict`; multiple → union, dedupe, ordered by page then value.
+- Model calls: our own retries (SDK `max_retries=0`) on 429/5xx/timeouts/connection errors,
+  exponential backoff with full jitter, per-call timeout (`LLM_*` settings). Unusable output
+  (truncated, refused, not JSON) fails with `ExtractionError`, which never carries content.
+  Logged per call: `llm_call` with attempt, http status, duration and token counts only.
+- `extract_for_tenant(client, repo, doc, doc_type, settings)` loads the tenant's metadata and
+  subject ids through the repository, then extracts.
 - Facts go into the session DuckDB table `facts` (long format; joins to DB via `join_target`).
 
 ### Session (`src/chatmed/session/`)
@@ -69,6 +84,10 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 ### Tenant DB (`src/chatmed/tenant_db/`)
 - One read-only role per tenant (`chatmed_reader_{tenant}`), which can only connect to its own
   database (D8). Repository functions take `tenant_id` from the session, never from the model.
+- `PostgresTenantRepository(settings, tenant_id)` is bound to one tenant at construction; the
+  tenant must match `^[a-z0-9_]+$` and be in `TENANTS` before it fills the DSN template (D13a).
+  Fixed parameterized queries, connections set read-only. Methods: `field_schema(doc_type)`,
+  `subject_ids()`. psycopg's async driver needs a selector event loop on Windows.
 - Agent tools are parameterized queries for main paths.
 - Restricted SQL tool (optional): SELECT only, allow-listed tables/views, tenant filter enforced,
   row limit, timeout. Parsed/validated before execution (e.g. `sqlglot`).

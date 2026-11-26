@@ -1,0 +1,34 @@
+{
+  "_comment": "Hand-written model response for the OCR text of the scanned form (Tesseract, 300 DPI, eng). Quotes include the OCR noise around the drawn boxes; code must make the checkbox fields undeterminable except hospitalisation (narrative).",
+  "fixture": "cioms_initial_scanned.pdf",
+  "parser": "tesseract",
+  "doc_type": "cioms",
+  "response": {
+    "age": {"value": 47, "evidence": {"page": 1, "quote": "2a. Age: 47 years"}, "other_statements": []},
+    "concomitant_drugs": [
+      {"value": "Metformin 850 mg", "evidence": {"page": 1, "quote": "Metformin 850 mg"}},
+      {"value": "Atorvastatin 20 mg", "evidence": {"page": 1, "quote": "Atorvastatin 20 mg"}}
+    ],
+    "country": {"value": "Argentina", "evidence": {"page": 1, "quote": "Country: Argentina"}, "other_statements": []},
+    "daily_dose": {"value": "20 mg daily", "evidence": {"page": 1, "quote": "15. Daily dose(s): 20 mg daily"}, "other_statements": []},
+    "date_received": {"value": "2026-06-15", "evidence": {"page": 1, "quote": "24c. Date received by manufacturer: 2026-06-15"}, "other_statements": []},
+    "dechallenge": {"value": "yes", "evidence": {"page": 1, "quote": "20. Did reaction abate after stopping drug? X yes [] no [] NA"}, "other_statements": []},
+    "disability": {"value": null, "evidence": null, "other_statements": []},
+    "hospitalisation": {"value": true, "evidence": {"page": 1, "quote": "The patient was hospitalised on 2026-06-13"}, "other_statements": []},
+    "indication": {"value": "rheumatoid arthritis", "evidence": {"page": 1, "quote": "17. Indication(s) for use: rheumatoid arthritis"}, "other_statements": []},
+    "life_threatening": {"value": null, "evidence": null, "other_statements": []},
+    "mfr_control_no": {"value": "ACM-2026-0042", "evidence": {"page": 1, "quote": "24b. Mfr control no.: ACM-2026-0042"}, "other_statements": []},
+    "patient_died": {"value": null, "evidence": null, "other_statements": []},
+    "reaction_description": {"value": "acute liver injury, ALT 8x ULN", "evidence": {"page": 1, "quote": "Describe reaction(s): acute liver injury, ALT 8x ULN"}, "other_statements": []},
+    "reaction_onset_date": {"value": "2026-06-12", "evidence": {"page": 1, "quote": "4-6. Reaction onset: 2026-06-12"}, "other_statements": []},
+    "rechallenge": {"value": "na", "evidence": {"page": 1, "quote": "21. Did reaction reappear after reintroduction? L] yes L] no XK] NA"}, "other_statements": []},
+    "report_type": {"value": "initial", "evidence": {"page": 1, "quote": "25a. Report type: X initial LJ followup"}, "other_statements": []},
+    "route": {"value": "oral", "evidence": {"page": 1, "quote": "16. Route(s) of administration: oral"}, "other_statements": []},
+    "sex": {"value": "F", "evidence": {"page": 1, "quote": "3. Sex: F"}, "other_statements": []},
+    "subject_id": {"value": "101-01001-004", "evidence": {"page": 1, "quote": "Subject ID 101-01001-004"}, "other_statements": []},
+    "suspect_drug": [
+      {"value": "Zentrobal", "evidence": {"page": 1, "quote": "14. Suspect drug(s): Zentrobal"}}
+    ],
+    "therapy_start_date": {"value": "2026-03-10", "evidence": {"page": 1, "quote": "18. Therapy dates (from/to): 2026-03-10"}, "other_statements": []}
+  }
+}

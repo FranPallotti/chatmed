@@ -13,13 +13,21 @@ FROM document_types d,
   ('reaction_onset_date', 'Reaction onset',     'Boxes 4-6: date the reaction started', 'date', TRUE, FALSE, NULL, NULL, NULL, 2),
   ('reaction_description','Reaction description','Boxes 7+13: description of the reaction(s)', 'string', TRUE, FALSE, NULL, NULL, NULL, 3),
   ('serious',             'Serious',            'Any of boxes 8-12 (died, hospitalisation, disability, life threatening) is checked', 'boolean', FALSE, FALSE, NULL, NULL, NULL, 4),
-  ('suspect_drug',        'Suspect drug',       'Box 14: suspect drug name(s), one per entry', 'string', TRUE, TRUE, NULL, NULL, NULL, 5),
+  ('suspect_drug',        'Suspect drug',       'Box 14 only: suspect drug name(s), one per entry; never the concomitant drugs of box 22', 'string', TRUE, TRUE, NULL, NULL, NULL, 5),
   ('report_type',         'Report type',        'Box 25a: initial or follow-up report', 'enum', FALSE, FALSE, '["initial","followup"]', NULL, NULL, 6)
 ) AS f(key, label, description, data_type, required, multiple, allowed_values, unit, join_target, sort_order)
 WHERE d.code = 'cioms';
 
 -- Fields whose value is a tick mark on the form (D13).
-UPDATE field_definitions SET checkbox = TRUE WHERE key IN ('serious','report_type');
+-- box_labels: the text printed next to each box (D13b); "serious" is any of the four boxes.
+UPDATE field_definitions fd SET checkbox = TRUE, box_labels = b.labels
+FROM (VALUES
+  ('serious',     ARRAY['patient died', 'involved or prolonged inpatient hospitalisation',
+                        'involved persistent or significant disability or incapacity',
+                        'life threatening']),
+  ('report_type', ARRAY['Report type'])
+) AS b(key, labels)
+WHERE fd.key = b.key;
 
 INSERT INTO adsl (studyid, usubjid, subjid, siteid, age, sex, country, arm, trt01a, trtsdt, trtedt, saffl) VALUES
   ('GLX-202', 'GLX-202-20101-007', '20101-007', '20101', 72, 'M', 'USA', 'Velorin 5 mg', 'Velorin 5 mg', '2026-02-15', '2026-07-31', 'Y'),

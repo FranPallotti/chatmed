@@ -20,7 +20,7 @@ FROM document_types d,
   ('hospitalisation',     'Hospitalisation',          'Boxes 8-12: "involved or prolonged inpatient hospitalisation" is checked', 'boolean', FALSE, FALSE, NULL, NULL, NULL, 8),
   ('disability',          'Disability or incapacity', 'Boxes 8-12: "involved persistent or significant disability or incapacity" is checked', 'boolean', FALSE, FALSE, NULL, NULL, NULL, 9),
   ('life_threatening',    'Life threatening',         'Boxes 8-12: "life threatening" is checked', 'boolean', FALSE, FALSE, NULL, NULL, NULL, 10),
-  ('suspect_drug',        'Suspect drug',             'Box 14: suspect drug name(s), one per entry', 'string', TRUE, TRUE, NULL, NULL, NULL, 11),
+  ('suspect_drug',        'Suspect drug',             'Box 14 only: suspect drug name(s), one per entry; never the concomitant drugs of box 22', 'string', TRUE, TRUE, NULL, NULL, NULL, 11),
   ('daily_dose',          'Daily dose',               'Box 15: daily dose of the suspect drug, as written', 'string', FALSE, FALSE, NULL, NULL, NULL, 12),
   ('route',               'Route',                    'Box 16: route of administration', 'string', FALSE, FALSE, NULL, NULL, NULL, 13),
   ('indication',          'Indication',               'Box 17: indication for use', 'string', FALSE, FALSE, NULL, NULL, NULL, 14),
@@ -35,9 +35,19 @@ FROM document_types d,
 WHERE d.code = 'cioms';
 
 -- Fields whose value is a tick mark on the form: OCR text alone can't tell if they're checked (D13).
-UPDATE field_definitions SET checkbox = TRUE
-WHERE key IN ('patient_died','hospitalisation','disability','life_threatening',
-              'dechallenge','rechallenge','report_type');
+-- box_labels: the text printed next to each box (D13b), so code can tell a quoted label from a
+-- written statement.
+UPDATE field_definitions fd SET checkbox = TRUE, box_labels = b.labels
+FROM (VALUES
+  ('patient_died',     ARRAY['patient died']),
+  ('hospitalisation',  ARRAY['involved or prolonged inpatient hospitalisation']),
+  ('disability',       ARRAY['involved persistent or significant disability or incapacity']),
+  ('life_threatening', ARRAY['life threatening']),
+  ('dechallenge',      ARRAY['Did reaction abate after stopping drug?']),
+  ('rechallenge',      ARRAY['Did reaction reappear after reintroduction?']),
+  ('report_type',      ARRAY['Report type'])
+) AS b(key, labels)
+WHERE fd.key = b.key;
 
 INSERT INTO adsl (studyid, usubjid, subjid, siteid, age, sex, country, arm, trt01a, trtsdt, trtedt, saffl) VALUES
   ('ACM-101', 'ACM-101-01001-001', '01001-001', '01001', 54, 'F', 'ARG', 'Zentrobal 20 mg', 'Zentrobal 20 mg', '2026-03-02', '2026-08-30', 'Y'),
