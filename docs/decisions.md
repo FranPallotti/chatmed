@@ -45,6 +45,17 @@ Format: context → options → decision → why → consequences. Add new entri
   consistency test (N runs → identical facts). Optional HMAC-only drift log.
 - **Why:** LLMs are not bit-for-bit deterministic even with a seed; determinism must come from
   the architecture and be measured.
+- **Amendment (M2 review): rules version in the fingerprint.** The same model output can give
+  different facts under different code rules (D13a, D13b, D13c each did). So the fingerprint also
+  contains `RULES_VERSION` (`chatmed.extraction`). `tests/guardrails/test_rules_version.py`
+  hashes `ast.dump()` of the modules holding the rules (today only `chatmed.extraction`:
+  grounding, checkbox and box-label rules, merge, subject join) and fails unless the hash matches
+  the one recorded for the current `RULES_VERSION`; a change means bump the version and record
+  its new hash, never edit an old one. Comments, formatting and docstrings are ignored; any other
+  code change in those modules needs a bump, even one that is not a rule (cheap, and safer than
+  listing functions by hand). `ast.dump()` differs between Python minor versions, so the test
+  requires the pinned 3.12. The fingerprint also contains `schema_hash`, which covers every field
+  attribute, `checkbox` and `box_labels` included (tested).
 
 ## D7. Deployment
 - **Decision:** one Azure Container App, Azure OpenAI in Foundry, PostgreSQL with synthetic tenants,
