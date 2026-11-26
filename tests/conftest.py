@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +15,8 @@ from chatmed.parsing.pdfium import page_texts
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "fixtures"
+# scripts/ is not a package; tests import the fixture generator from it (make_fixtures).
+sys.path.insert(0, str(ROOT / "scripts"))
 WINDOWS_DEFAULT = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 
 

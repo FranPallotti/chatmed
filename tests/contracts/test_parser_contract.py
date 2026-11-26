@@ -57,6 +57,13 @@ CASES: list[tuple[str, Factory, str]] = [
     ("routing+tesseract", _routing_tesseract, "scanned_lab_report.pdf"),
     ("docintel(fake)", _docintel, "multi_page_report.pdf"),
     ("routing+docintel(fake)", _routing_docintel, "mixed_report.pdf"),
+    # M1b AC3: CIOMS I fixtures (D12)
+    ("pdfium", _pdfium, "cioms_initial.pdf"),
+    ("pdfium", _pdfium, "cioms_followup.pdf"),
+    ("tesseract", _tesseract, "cioms_initial_scanned.pdf"),
+    ("routing+tesseract", _routing_tesseract, "cioms_initial.pdf"),
+    ("routing+tesseract", _routing_tesseract, "cioms_initial_scanned.pdf"),
+    ("routing+docintel(fake)", _routing_docintel, "cioms_followup.pdf"),
 ]
 
 

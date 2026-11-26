@@ -1,14 +1,24 @@
 """M1 parsing tests: fixtures (AC1), parsers and routing (AC2), parser_id (AC2b),
-missing Tesseract (AC2c) and the Document Intelligence backend with a fake client (AC5)."""
+missing Tesseract (AC2c) and the Document Intelligence backend with a fake client (AC5).
+M1b AC5: Tesseract 4/5 output parsing and tessdata discovery on Linux."""
 
 from __future__ import annotations
 
 import hashlib
 import logging
-import sys
 from pathlib import Path
 
 import pytest
+from make_fixtures import (
+    BANNER,
+    CIOMS_CASE,
+    CIOMS_LAYOUT,
+    SCANNED_FIXTURES,
+    build_fixtures,
+    build_pdf,
+    cioms_form_lines,
+    read_source_fingerprint,
+)
 
 from chatmed.config import Settings
 from chatmed.models import ParsedDocument
@@ -26,13 +36,13 @@ from chatmed.parsing.pdfium import page_count, page_texts, render_page_pgm, subs
 from chatmed.parsing.tesseract_ocr import (
     TesseractInstall,
     _decode_ocr,
+    find_tessdata_dir,
     format_parser_id,
     language_data_sha256,
+    parse_list_langs,
+    parse_version_output,
 )
 from tests.conftest import FIXTURES, ROOT, FakeDocIntelClient, fixture_bytes
-
-sys.path.insert(0, str(ROOT / "scripts"))
-from make_fixtures import BANNER, build_fixtures  # noqa: E402
 
 MARKERS = ("Hemoglobin", "13.4", "00123")
 
@@ -40,11 +50,73 @@ MARKERS = ("Hemoglobin", "13.4", "00123")
 # ---------------------------------------------------------------- AC1: fixtures
 
 
+def _gray_pixels(pdf: bytes, index: int, dpi: int = 72) -> tuple[tuple[int, int], bytes]:
+    magic, size, _maxval, pixels = render_page_pgm(pdf, index, dpi).split(b"\n", 3)
+    width, height = (int(v) for v in size.split())
+    return (width, height), pixels
+
+
+def _assert_same_scanned_fixture(committed: bytes, built: bytes, name: str) -> None:
+    """Image-only fixtures, whose bytes differ across platforms.
+
+    Content: the source fingerprint in the PDF metadata must match (catches any edit to the
+    page lines, even one character). Rendering: same size and mean pixel difference < 1%
+    (catches a wrong or broken raster, not small edits, so it tolerates platform noise).
+    """
+    source = read_source_fingerprint(built)
+    assert source is not None, f"{name}: no source fingerprint"
+    assert read_source_fingerprint(committed) == source, f"regenerate: make_fixtures.py ({name})"
+    assert page_count(committed) == page_count(built), name
+    assert page_texts(committed) == page_texts(built), name  # image-only pages: '' in both
+    _assert_same_rendering(committed, built, name)
+
+
+def _assert_same_rendering(committed: bytes, built: bytes, name: str) -> None:
+    """Same page size and mean gray-level difference < 1% at 72 DPI, page by page."""
+    for index in range(page_count(built)):
+        (size_a, a), (size_b, b) = _gray_pixels(committed, index), _gray_pixels(built, index)
+        assert size_a == size_b, f"{name} page {index + 1}: size differs"
+        mean_diff = sum(abs(x - y) for x, y in zip(a, b, strict=True)) / len(a)
+        assert mean_diff < 2.55, f"{name} page {index + 1}: mean pixel diff {mean_diff:.2f}"
+
+
 def test_fixture_generation_is_reproducible_and_committed() -> None:
+    """Regenerated fixtures match the committed ones (M1 AC1, M1b AC5).
+
+    Digital fixtures are compared byte for byte. Image-only ones embed a raster whose bytes
+    differ between Windows and Linux (found running the suite on Linux), so they are compared
+    by source fingerprint, text layer and rendered pixels; see fixtures/README.md.
+    """
     built = build_fixtures()
-    assert built == build_fixtures()
+    assert built == build_fixtures()  # deterministic on this platform
+    assert set(built) == {p.name for p in FIXTURES.glob("*.pdf")}
     for name, data in built.items():
-        assert (FIXTURES / name).read_bytes() == data, f"regenerate: make_fixtures.py ({name})"
+        committed = (FIXTURES / name).read_bytes()
+        if name in SCANNED_FIXTURES:
+            _assert_same_scanned_fixture(committed, data, name)
+        else:
+            assert committed == data, f"regenerate: make_fixtures.py ({name})"
+
+
+def _scanned_cioms(**changes: str) -> bytes:
+    lines = cioms_form_lines("initial")
+    for key, value in changes.items():
+        lines = [line.replace(CIOMS_CASE[key], value) for line in lines]
+    return build_pdf([lines], scanned=frozenset({1}), layout=CIOMS_LAYOUT)
+
+
+def test_scanned_check_detects_a_one_digit_edit() -> None:
+    committed = fixture_bytes("cioms_initial_scanned.pdf")
+    stale = _scanned_cioms(reaction_onset_date="2026-06-13")
+    with pytest.raises(AssertionError, match="regenerate"):
+        _assert_same_scanned_fixture(committed, stale, "cioms_initial_scanned.pdf")
+
+
+def test_scanned_check_detects_a_different_raster() -> None:
+    fixtures = build_fixtures()
+    other_raster = fixtures["scanned_lab_report.pdf"]
+    with pytest.raises(AssertionError, match="pixel diff"):
+        _assert_same_rendering(other_raster, fixtures["cioms_initial_scanned.pdf"], "x")
 
 
 def test_fixture_shapes() -> None:
@@ -179,6 +251,87 @@ def test_language_data_hash_tracks_file_contents_and_order(tmp_path: Path) -> No
     assert language_data_sha256(a, ["eng", "spa"]) != language_data_sha256(a, ["spa", "eng"])
     with pytest.raises(TesseractNotAvailable):
         language_data_sha256(a, ["fra"])
+
+
+TESSERACT_5_VERSION = """tesseract v5.4.0.20240606
+ leptonica-1.84.1
+  libgif 5.2.1 : libjpeg 8d (libjpeg-turbo 3.0.1) : libpng 1.6.43
+"""
+TESSERACT_4_VERSION = """tesseract 4.1.1
+ leptonica-1.79.0
+  libgif 5.1.4 : libjpeg 8d (libjpeg-turbo 2.0.6) : libpng 1.6.37
+"""
+
+
+def test_version_output_of_tesseract_4_and_5() -> None:
+    assert parse_version_output(TESSERACT_5_VERSION) == ("5.4.0.20240606", "1.84.1")
+    assert parse_version_output("Warning: x\n" + TESSERACT_4_VERSION) == ("4.1.1", "1.79.0")
+    with pytest.raises(TesseractNotAvailable):
+        parse_version_output("something else")
+
+
+def test_list_langs_output_of_tesseract_4_and_5() -> None:
+    v5 = 'List of available languages in "/usr/share/tesseract-ocr/5/tessdata/" (2):\neng\nosd\n'
+    v4 = "List of available languages (2):\neng\nosd\n"
+    assert parse_list_langs(v5) == ("/usr/share/tesseract-ocr/5/tessdata/", ["eng", "osd"])
+    assert parse_list_langs(v4) == (None, ["eng", "osd"])
+
+
+def _tessdata(folder: Path, *langs: str) -> Path:
+    folder.mkdir(parents=True)
+    for lang in langs:
+        (folder / f"{lang}.traineddata").write_bytes(b"fake model")
+    return folder
+
+
+def test_tessdata_prefix_wins(tmp_path: Path) -> None:
+    prefix = _tessdata(tmp_path / "prefix", "eng")
+    listed = _tessdata(tmp_path / "listed", "eng")
+    assert (
+        find_tessdata_dir(["eng"], listed=str(listed), prefix=str(prefix), version="5.4.0")
+        == prefix
+    )
+
+
+def test_tessdata_prefix_may_be_the_parent_folder(tmp_path: Path) -> None:
+    data = _tessdata(tmp_path / "tessdata", "eng")
+    assert find_tessdata_dir(["eng"], listed=None, prefix=str(tmp_path), version="5.4.0") == data
+
+
+def test_tessdata_listed_dir_when_no_prefix(tmp_path: Path) -> None:
+    listed = _tessdata(tmp_path / "listed", "eng", "spa")
+    assert (
+        find_tessdata_dir(["eng", "spa"], listed=str(listed), prefix=None, version="5.4.0")
+        == listed
+    )
+
+
+def test_tessdata_prefix_without_the_language_is_skipped(tmp_path: Path) -> None:
+    prefix = _tessdata(tmp_path / "prefix", "eng")
+    listed = _tessdata(tmp_path / "listed", "eng", "spa")
+    assert (
+        find_tessdata_dir(["eng", "spa"], listed=str(listed), prefix=str(prefix), version="5.4.0")
+        == listed
+    )
+
+
+def test_tessdata_falls_back_to_the_package_dir_of_the_same_major_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    v5 = _tessdata(tmp_path / "usr/share/tesseract-ocr/5/tessdata", "eng")
+    v4 = _tessdata(tmp_path / "usr/share/tesseract-ocr/4.00/tessdata", "eng")
+    monkeypatch.setattr(
+        "chatmed.parsing.tesseract_ocr.SYSTEM_TESSDATA_DIRS", {"5": (v5,), "4": (v4,)}
+    )
+    # both packages installed: each binary gets its own models, never the other's
+    assert find_tessdata_dir(["eng"], listed=None, prefix=None, version="4.1.1") == v4
+    assert find_tessdata_dir(["eng"], listed=None, prefix=None, version="5.3.0") == v5
+
+
+def test_tessdata_not_found_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("chatmed.parsing.tesseract_ocr.SYSTEM_TESSDATA_DIRS", {})
+    with pytest.raises(TesseractNotAvailable, match="language data directory"):
+        find_tessdata_dir(["eng"], listed=None, prefix=None, version="5.4.0")
 
 
 def test_ocr_decode_error_does_not_carry_text() -> None:
