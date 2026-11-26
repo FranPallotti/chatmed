@@ -22,6 +22,7 @@ CREATE TABLE field_definitions (
     allowed_values   JSONB,
     unit             VARCHAR(32),
     join_target      VARCHAR(128),
+    checkbox         BOOLEAN      NOT NULL DEFAULT FALSE,  -- value is a tick mark on the form (D13)
     sort_order       INT          NOT NULL DEFAULT 0,
     active           BOOLEAN      NOT NULL DEFAULT TRUE,
     UNIQUE (document_type_id, key)

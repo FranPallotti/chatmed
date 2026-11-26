@@ -18,6 +18,9 @@ FROM document_types d,
 ) AS f(key, label, description, data_type, required, multiple, allowed_values, unit, join_target, sort_order)
 WHERE d.code = 'cioms';
 
+-- Fields whose value is a tick mark on the form (D13).
+UPDATE field_definitions SET checkbox = TRUE WHERE key IN ('serious','report_type');
+
 INSERT INTO adsl (studyid, usubjid, subjid, siteid, age, sex, country, arm, trt01a, trtsdt, trtedt, saffl) VALUES
   ('GLX-202', 'GLX-202-20101-007', '20101-007', '20101', 72, 'M', 'USA', 'Velorin 5 mg', 'Velorin 5 mg', '2026-02-15', '2026-07-31', 'Y'),
   ('GLX-202', 'GLX-202-20102-002', '20102-002', '20102', 58, 'F', 'CAN', 'Velorin 5 mg', 'Velorin 5 mg', '2026-03-01', NULL,         'Y');
