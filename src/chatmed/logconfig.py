@@ -20,12 +20,14 @@ Named `logconfig` (not `logging`) so it never shadows the standard library modul
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 import os
 import re
 import sys
+import threading
 import traceback
 from datetime import UTC, datetime
 from typing import Any
@@ -48,8 +50,15 @@ ALLOWED_FIELDS: frozenset[str] = frozenset(
         "http_status",
         "error_type",
         "error_where",
+        "doc_type",  # tenant metadata code (e.g. "cioms"), not document content
+        "tool_name",  # one of the fixed agent tool names
+        "iteration",
+        "output_chars",  # length of a rejected model answer, never the answer itself
     }
 )
+# Loggers that come with their own handlers (uvicorn's default config); M3 AC7 routes them
+# through the root handler so the filter sees their records too.
+ROUTED_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi", "fastapi")
 MAX_STR_LEN = 128
 EVENT_NAME = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
 UNSTRUCTURED_EVENT = "unstructured_message"
@@ -119,9 +128,47 @@ def make_handler(stream: Any = None) -> logging.Handler:
 
 
 def configure_logging(level: str = "INFO") -> None:
-    """Replace all root handlers with the metadata-only handler. Call once at startup."""
+    """Replace all root handlers with the metadata-only handler. Call once at startup.
+
+    Also strips the handlers uvicorn installs on its own loggers and lets their records
+    propagate to the root handler, and installs the uncaught-exception hooks (M3 AC7).
+    """
     root = logging.getLogger()
     for existing in list(root.handlers):
         root.removeHandler(existing)
     root.addHandler(make_handler())
     root.setLevel(level)
+    for name in ROUTED_LOGGERS:
+        logger = logging.getLogger(name)
+        for existing in list(logger.handlers):
+            logger.removeHandler(existing)
+        logger.propagate = True
+    install_exception_hooks()
+
+
+_hook_log = logging.getLogger("chatmed.uncaught")
+
+
+def _log_uncaught(exc_type: type[BaseException], exc: BaseException, tb: Any) -> None:
+    """sys.excepthook: the default hook prints the exception message to stderr."""
+    _hook_log.critical("uncaught_exception", exc_info=(exc_type, exc, tb))
+
+
+def _log_thread_exception(args: threading.ExceptHookArgs) -> None:
+    if args.exc_type is not None:
+        _log_uncaught(args.exc_type, args.exc_value or args.exc_type(), args.exc_traceback)
+
+
+def asyncio_exception_handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+    """For `loop.set_exception_handler`: the default one logs `context['message']` and repr()s."""
+    exc = context.get("exception")
+    if isinstance(exc, BaseException):
+        _hook_log.error("asyncio_exception", exc_info=(type(exc), exc, exc.__traceback__))
+    else:
+        _hook_log.error("asyncio_exception")
+
+
+def install_exception_hooks() -> None:
+    """Route uncaught exceptions (main thread, other threads) through the filtered logger."""
+    sys.excepthook = _log_uncaught
+    threading.excepthook = _log_thread_exception

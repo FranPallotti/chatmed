@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,6 +20,7 @@ from typing import Any
 from chatmed.extraction import DocTypeSchema, user_message
 from chatmed.parsing import PdfiumParser, TesseractOcrParser
 from chatmed.parsing.base import DocumentParser
+from chatmed.tenant_db import UnknownDocumentType
 from tests.conftest import FIXTURES, find_tesseract
 
 Key = tuple[tuple[str, ...], str]
@@ -252,20 +254,109 @@ SUBJIDS_BY_TENANT = {
 }
 
 
+def _adsl(subjid: str, age: int, sex: str, arm: str, start: str, end: str | None) -> dict[str, Any]:
+    return {
+        "studyid": "ACM-101",
+        "usubjid": f"ACM-101-{subjid}",
+        "subjid": subjid,
+        "siteid": subjid[:5],
+        "age": age,
+        "ageu": "YEARS",
+        "sex": sex,
+        "country": "ARG",
+        "arm": arm,
+        "trt01a": arm,
+        "trtsdt": date.fromisoformat(start),
+        "trtedt": date.fromisoformat(end) if end else None,
+        "saffl": "Y",
+    }
+
+
+def _adae(
+    subjid: str, seq: int, term: str, start: str, ser: str, acn: str, out: str
+) -> dict[str, Any]:
+    return {
+        "studyid": "ACM-101",
+        "usubjid": f"ACM-101-{subjid}",
+        "aeseq": seq,
+        "aeterm": term,
+        "aedecod": term.capitalize(),
+        "aebodsys": "Synthetic SOC",
+        "astdt": date.fromisoformat(start),
+        "aendt": None,
+        "aesev": "SEVERE" if ser == "Y" else "MILD",
+        "aeser": ser,
+        "aerel": "PROBABLY RELATED",
+        "aeacn": acn,
+        "aeout": out,
+        "trtemfl": "Y",
+    }
+
+
+# Mirrors the acme adsl/adae rows of the CIOMS subject (db/seed/tenant_acme.sql).
+ADSL_BY_TENANT: dict[str, list[dict[str, Any]]] = {
+    "acme": [
+        _adsl("01001-001", 54, "F", "Zentrobal 20 mg", "2026-03-02", "2026-08-30"),
+        _adsl("01001-004", 47, "F", "Zentrobal 20 mg", "2026-03-10", "2026-06-14"),
+    ],
+    "globex": [],
+}
+ADAE_BY_TENANT: dict[str, list[dict[str, Any]]] = {
+    "acme": [
+        _adae(
+            "01001-001", 1, "headache", "2026-03-20", "N", "DOSE NOT CHANGED", "RECOVERED/RESOLVED"
+        ),
+        _adae(
+            "01001-004",
+            1,
+            "rash on arms",
+            "2026-04-03",
+            "N",
+            "DOSE NOT CHANGED",
+            "RECOVERED/RESOLVED",
+        ),
+        _adae(
+            "01001-004",
+            2,
+            "acute liver injury",
+            "2026-06-12",
+            "Y",
+            "DRUG WITHDRAWN",
+            "RECOVERED/RESOLVED",
+        ),
+    ],
+    "globex": [],
+}
+
+
 class FakeTenantRepository:
     """In-memory stand-in for PostgresTenantRepository, bound to one tenant like the real one."""
 
     def __init__(self, tenant_id: str) -> None:
         self.tenant_id = tenant_id
         self.calls: list[str] = []
+        self.adae = [dict(r) for r in ADAE_BY_TENANT.get(tenant_id, [])]  # tests may edit
 
     async def field_schema(self, doc_type: str) -> DocTypeSchema:
         self.calls.append("field_schema")
+        if doc_type != "cioms":
+            raise UnknownDocumentType("no active fields for this document type")
         return DocTypeSchema.from_rows(self.tenant_id, doc_type, ROWS_BY_TENANT[self.tenant_id])
 
     async def subject_ids(self) -> list[str]:
         self.calls.append("subject_ids")
         return list(SUBJIDS_BY_TENANT[self.tenant_id])
+
+    async def subject(self, subjid: str) -> dict[str, Any] | None:
+        self.calls.append("subject")
+        rows = [r for r in ADSL_BY_TENANT.get(self.tenant_id, []) if r["subjid"] == subjid]
+        return dict(rows[0]) if rows else None
+
+    async def adverse_events(self, subjid: str, serious_only: bool) -> list[dict[str, Any]]:
+        self.calls.append("adverse_events")
+        rows = [r for r in self.adae if r["usubjid"].endswith(f"-{subjid}")]
+        rows = [r for r in rows if r["aeser"] == "Y" or not serious_only]
+        return sorted((dict(r) for r in rows), key=lambda r: r["aeseq"])
 
 
 def completion(content: str) -> Any:
@@ -334,3 +425,64 @@ class FakeModelClient:
             key = (tuple(sorted(rec["response"])), user_message(rec["doc_type"], doc.pages))
             responses[key] = rec["response"]
         return cls(responses)
+
+
+# ---------------------------------------------------------------- agent (M3)
+
+
+def tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """One scripted step: the model calls `name` with `arguments`."""
+    return {"tool": name, "arguments": arguments}
+
+
+def final(
+    text: str, cited_ids: list[str], quotes: list[dict[str, str]] | None = None
+) -> dict[str, Any]:
+    """One scripted step: the model's final JSON answer."""
+    return {"answer": {"text": text, "cited_ids": cited_ids, "quotes": quotes or []}}
+
+
+def _tool_completion(name: str, arguments: dict[str, Any], n: int) -> Any:
+    call = SimpleNamespace(
+        id=f"call_{n}",
+        type="function",
+        function=SimpleNamespace(name=name, arguments=json.dumps(arguments)),
+    )
+    message = SimpleNamespace(content=None, refusal=None, tool_calls=[call])
+    return SimpleNamespace(
+        choices=[SimpleNamespace(finish_reason="tool_calls", message=message)],
+        usage=SimpleNamespace(prompt_tokens=500, completion_tokens=20),
+        system_fingerprint="fp_fake",
+    )
+
+
+class ScriptedModelClient:
+    """Agent-side fake: requests with `tools` get the next scripted step, in order.
+
+    Requests without `tools` (extraction) go to `extraction`, e.g. a FakeModelClient with the
+    recordings, so one client can serve a whole upload + ask flow. A step may be a callable
+    taking the request, for scripts that depend on what the tools returned (e.g. a sha).
+    """
+
+    def __init__(self, steps: list[Any], *, extraction: Any = None) -> None:
+        self.steps = list(steps)
+        self.extraction = extraction
+        self.requests: list[dict[str, Any]] = []
+        self.chat = SimpleNamespace(completions=self)
+
+    async def create(self, **request: Any) -> Any:
+        if "tools" not in request:
+            return await self.extraction.create(**request)
+        self.requests.append(request)
+        if not self.steps:
+            raise LookupError("script exhausted")
+        step = self.steps.pop(0)
+        if callable(step):
+            step = step(request)
+        if isinstance(step, Exception):
+            raise step
+        if not isinstance(step, dict):
+            return step  # a ready-made completion object
+        if "tool" in step:
+            return _tool_completion(step["tool"], step["arguments"], len(self.requests))
+        return completion(json.dumps(step["answer"]))

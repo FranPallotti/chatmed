@@ -25,6 +25,7 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "fpdf2>=2.8",  # writes the synthetic fixture PDFs (scripts/make_fixtures.py)
+    "httpx2>=2.16",  # Starlette TestClient (tests/test_api.py); httpx is deprecated there
 ]
 
 [build-system]

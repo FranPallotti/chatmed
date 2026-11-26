@@ -28,6 +28,18 @@ WHERE dt.code = %(doc_type)s AND dt.active AND fd.active
 ORDER BY fd.key
 """
 SUBJECT_IDS_SQL = "SELECT subjid FROM adsl ORDER BY subjid"
+SUBJECT_SQL = """
+SELECT studyid, usubjid, subjid, siteid, age, ageu, sex, country, arm, trt01a, trtsdt, trtedt,
+       saffl
+FROM adsl WHERE subjid = %(subjid)s
+"""
+ADVERSE_EVENTS_SQL = """
+SELECT e.studyid, e.usubjid, e.aeseq, e.aeterm, e.aedecod, e.aebodsys, e.astdt, e.aendt,
+       e.aesev, e.aeser, e.aerel, e.aeacn, e.aeout, e.trtemfl
+FROM adae e JOIN adsl s ON s.usubjid = e.usubjid
+WHERE s.subjid = %(subjid)s AND (NOT %(serious_only)s OR e.aeser = 'Y')
+ORDER BY e.aeseq
+"""
 
 
 class TenantNotAllowed(ValueError):
@@ -46,6 +58,10 @@ class TenantRepository(Protocol):
     async def field_schema(self, doc_type: str) -> DocTypeSchema: ...
 
     async def subject_ids(self) -> list[str]: ...
+
+    async def subject(self, subjid: str) -> dict[str, Any] | None: ...
+
+    async def adverse_events(self, subjid: str, serious_only: bool) -> list[dict[str, Any]]: ...
 
 
 def tenant_dsn(settings: Settings, tenant_id: str) -> str:
@@ -71,6 +87,16 @@ class PostgresTenantRepository:
     async def subject_ids(self) -> list[str]:
         rows = await self._fetch("subject_ids", SUBJECT_IDS_SQL, {})
         return [row["subjid"] for row in rows]
+
+    async def subject(self, subjid: str) -> dict[str, Any] | None:
+        """The `adsl` row for one subject, or None. Callers check the subject is joined."""
+        rows = await self._fetch("subject", SUBJECT_SQL, {"subjid": subjid})
+        return rows[0] if rows else None
+
+    async def adverse_events(self, subjid: str, serious_only: bool) -> list[dict[str, Any]]:
+        """The subject's `adae` rows ordered by `aeseq` (stable order, rule 3)."""
+        params = {"subjid": subjid, "serious_only": serious_only}
+        return await self._fetch("adverse_events", ADVERSE_EVENTS_SQL, params)
 
     async def _fetch(self, query: str, sql: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         import psycopg

@@ -5,11 +5,19 @@ from __future__ import annotations
 import io
 import json
 import logging
+import sys
+import threading
 from collections.abc import Iterator
 
 import pytest
 
-from chatmed.logconfig import MAX_STR_LEN, UNSTRUCTURED_EVENT, configure_logging, make_handler
+from chatmed.logconfig import (
+    MAX_STR_LEN,
+    ROUTED_LOGGERS,
+    UNSTRUCTURED_EVENT,
+    configure_logging,
+    make_handler,
+)
 
 SECRET = "Hemoglobin 13.4 g/dL for MRN 00123"  # synthetic stand-in for document content
 
@@ -117,8 +125,17 @@ def test_records_from_child_loggers_are_filtered(
     assert lines(stream)[0]["duration_ms"] == 12.5
 
 
-def test_configure_logging_installs_only_the_metadata_handler() -> None:
+def test_configure_logging_installs_only_the_metadata_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The central entry point replaces any existing root handler and sets the level."""
+    # configure_logging also installs exception hooks and reroutes uvicorn (M3 AC7): undo it.
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)
+    monkeypatch.setattr(threading, "excepthook", threading.excepthook)
+    for name in ROUTED_LOGGERS:
+        logger = logging.getLogger(name)
+        monkeypatch.setattr(logger, "propagate", logger.propagate)
+        monkeypatch.setattr(logger, "handlers", list(logger.handlers))
     root = logging.getLogger()
     saved_handlers, saved_level = list(root.handlers), root.level
     try:

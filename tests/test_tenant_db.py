@@ -22,7 +22,13 @@ from chatmed.tenant_db import (
     UnknownDocumentType,
     tenant_dsn,
 )
-from tests.fakes import ACME_CIOMS_ROWS, GLOBEX_CIOMS_ROWS, SUBJIDS_BY_TENANT
+from tests.fakes import (
+    ACME_CIOMS_ROWS,
+    ADAE_BY_TENANT,
+    ADSL_BY_TENANT,
+    GLOBEX_CIOMS_ROWS,
+    SUBJIDS_BY_TENANT,
+)
 from tests.test_extraction_m2 import make_settings
 
 TEMPLATE = "postgresql://chatmed_reader_{tenant}@localhost:5432/tenant_{tenant}"
@@ -145,3 +151,34 @@ def test_checkbox_fields_must_have_box_labels(db_settings: Settings) -> None:
     for tenant in ("acme", "globex"):
         rows = run_db(PostgresTenantRepository(db_settings, tenant)._fetch("probe", sql, {}))
         assert any("box_labels" in r["def"] and "checkbox" in r["def"] for r in rows)
+
+
+# ---------------------------------------------------------------- M3 AC1: agent tool queries
+
+AE_KEYS = ("usubjid", "aeseq", "aeterm", "astdt", "aeser", "aeacn", "aeout")
+
+
+def test_subject_row_matches_the_fake(db_settings: Settings) -> None:
+    """tests/fakes.py mirrors the seed, so the agent tests use the same data as the DB."""
+    repo = PostgresTenantRepository(db_settings, "acme")
+    for fake in ADSL_BY_TENANT["acme"]:
+        assert run_db(repo.subject(fake["subjid"])) == fake
+    assert run_db(repo.subject("99999-999")) is None
+
+
+def test_adverse_events_match_the_fake_and_filter_serious(db_settings: Settings) -> None:
+    repo = PostgresTenantRepository(db_settings, "acme")
+    rows = run_db(repo.adverse_events("01001-004", False))
+    fakes = [r for r in ADAE_BY_TENANT["acme"] if r["usubjid"].endswith("01001-004")]
+    assert [tuple(r[k] for k in AE_KEYS) for r in rows] == [
+        tuple(r[k] for k in AE_KEYS) for r in fakes
+    ]
+    serious = run_db(repo.adverse_events("01001-004", True))
+    assert [r["aeseq"] for r in serious] == [2]
+
+
+def test_other_tenants_subject_is_not_visible(db_settings: Settings) -> None:
+    """The globex database has no acme subjects: the tenant is the database (D8)."""
+    repo = PostgresTenantRepository(db_settings, "globex")
+    assert run_db(repo.subject("01001-004")) is None
+    assert run_db(repo.adverse_events("01001-004", False)) == []

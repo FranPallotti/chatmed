@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     llm_backoff_base_seconds: float = Field(default=1.0, gt=0)
     llm_backoff_max_seconds: float = Field(default=20.0, gt=0)
     extraction_max_completion_tokens: int = Field(default=4000, gt=0)
+    # Agent loop (M3, D14)
+    agent_max_iterations: int = Field(default=8, ge=1, le=20)
+    agent_max_completion_tokens: int = Field(default=1500, gt=0)
+    agent_fulltext_max_chars: int = Field(default=20_000, gt=0)  # above this: BM25 over pages
+    agent_bm25_top_k: int = Field(default=3, ge=1, le=10)
 
     # Parsing (fixed per deployment; part of the reproducibility fingerprint via parser_id)
     parser: Literal["routing", "pdfium"] = "routing"

@@ -229,3 +229,75 @@ Approved by the project owner after repeated real-model runs.
   quote, even though the line has extra words.
 - **Trade-off:** a citation can be longer than needed (a whole form line, or OCR text from
   another column on the same line).
+
+## D14. Agent loop, reconciliation, session tenant and answer streaming (M3)
+Approved by the project owner with the M3 plan.
+- **Session tenant:** `POST /sessions {"tenant_id": "acme"}`; the value must match
+  `^[a-z0-9_]+$` and be in `TENANTS` (D13a), else 422. It is fixed for the session's life, the
+  tenant repository is bound to it, and no agent tool has a tenant argument (rule 5).
+  **M5:** with Entra ID auth the tenant comes from the caller's token (an app role or group
+  claim mapped to one tenant), and the request field is removed or must equal it.
+- **Matching `adae` record for `reconcile_case`** (tiered, deterministic, in code):
+  1. exactly one of the subject's `adae` rows has `astdt` equal to one of the document's onset
+     values (`ok`, or the values of a `conflict`) → that record; onset item `match`;
+  2. otherwise, the unique serious (`aeser = 'Y'`) row whose `astdt` is nearest to an onset
+     value, within `AE_MATCH_WINDOW_DAYS = 7` → that record; onset item `mismatch` with the day
+     difference;
+  3. otherwise (no onset value, no row in the window, or a tie) → every item `not_comparable`,
+     reason `no_unique_ae_record`.
+  An onset `conflict` is never compared: the onset item is `not_comparable` (reason `conflict`)
+  even when its values selected the record. The window is a rule: `chatmed.agent.reconcile` is
+  one of the modules hashed for `RULES_VERSION` (D6), which became `rules-2`.
+- **Action taken / outcome:** the CIOMS field metadata has no such fields. These items are
+  `not_comparable`, reason `no_document_field`, unless the tenant defines fields with keys
+  `action_taken` / `outcome`. No seed fields are added.
+- **Seriousness:** the tenant's `serious` field if it has one, else the four CIOMS boxes
+  (`patient_died`, `hospitalisation`, `disability`, `life_threatening`): any `ok` true → `Y`;
+  all `ok` false → `N`; otherwise `not_comparable` (reason: the statuses, e.g. `undeterminable`).
+- **Answers:** the model ends the loop with a strict JSON answer `{text, cited_ids, quotes}`.
+  Code builds `facts_used` from the ids of tool results it holds (values never come from the
+  model), grounds quotes against page text, and rejects text whose numbers/dates are not in
+  `facts_used`. One retry, then a deterministic fallback text built from `facts_used`.
+  Output that is not exactly one JSON object (the real model once sent two back to back) is a
+  rejected answer and gets the same one retry. Every model call, rejected answers included,
+  counts toward `AGENT_MAX_ITERATIONS`. A rejected output is never logged: only its length
+  (`output_chars`) and the reason code.
+- **Reconciliation is one unit in `facts_used` (approved after AC9 runs, option A):** citing
+  any `recon:<doc>:` row adds all reconciliation items of that document, the `adae` record
+  they were compared with, and the document's **joined** `subject_id` fact. `reconcile_case`
+  returns and registers that fact itself (same id as `query_document_facts` gives it), so it
+  is added by code whether or not the model queried or cited it; an unjoined subject fact is
+  not added. The real model cited varying subsets across runs, which changed `facts_used` and
+  let `not_comparable` items drop out of the text; with the whole unit cited, the status check
+  makes the answer state every `not_comparable`.
+- **Session context (approved after AC9 runs):** a second system message lists the session's
+  documents (sha prefix, type, page count; sorted by sha256) and the tenant's field keys per
+  document type (sorted). Metadata only. It is part of the agent prompt, so
+  `tests/guardrails/test_agent_prompt_version.py` hashes the system prompt, this function and
+  the tool and answer schemas, and fails unless the hash is recorded for the current
+  `AGENT_PROMPT_VERSION`. A recorded hash is never re-recorded: any change bumps the version.
+- **Status names are checked verbatim (`agent-v2`):** the status check requires each status of
+  a cited row by its name (underscore or space). With `agent-v1` the real model wrote
+  "cannot be compared" for `not_comparable`, so every reconciliation answer was rejected once
+  (`status_not_stated`) and only verified on the retry. The check is not loosened to accept
+  paraphrases (that would weaken AC4); `agent-v2` tells the model the names are checked
+  verbatim, with that example. Reconciliation questions are answered from `reconcile_case`
+  only. AC9 also requires first-attempt verification.
+- **Answer fingerprint:** sha256 of `AGENT_PROMPT_VERSION`, `RULES_VERSION`, the deployment,
+  the seed and the sorted extraction fingerprints of the session's documents (D6). Returned in
+  the `answer` event; same fingerprint and question → same `facts_used` is what AC9 measures.
+- **Printed subject id (approved after AC9 runs):** `get_subject` / `list_adverse_events`
+  accept the `join_value` of a joined `subject_id` fact or that fact's id exactly as printed
+  (`101-01001-004`), which maps to the same fact's `join_value` only. Nothing else matches;
+  an unjoined or unknown id is refused before the tenant DB is called.
+- **Streaming (`POST /sessions/{id}/ask`):** NDJSON. Progress events carry metadata only
+  (`{"event": "tool", "name": ..., "iteration": ...}`); one final `answer` event carries the
+  verified text and `facts_used`. Tokens are not streamed because text must pass the code check
+  before anyone sees it. Targets (requirements): first event < 2 s, verified answer < 30 s.
+- **Interface change:** `SessionStore.get(session_id)` was added: the API needs a session's
+  tenant, history and lock by id. Starlette's `UploadFile` is not used (it spools uploads over
+  1 MB to a temp file); multipart bodies are parsed in memory with the stdlib `email` parser.
+  The upload body is read as a stream with a byte counter: a declared Content-Length over the
+  limit (`MAX_UPLOAD_MB` + 64 KiB multipart overhead) is refused with 413 before any byte is
+  read, and the first chunk past the limit ends the read with 413 (Content-Length may be absent
+  or wrong). The file part itself is then checked against `MAX_UPLOAD_MB`.

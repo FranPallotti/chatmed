@@ -1,7 +1,8 @@
 """D6: the code that turns model output into facts is versioned, and the version is enforced.
 
 `RULES_VERSION` is part of the extraction fingerprint. This test hashes the AST of the modules
-that hold the rules (grounding, checkbox rules D13a/D13b, merge, subject join) and fails if
+that hold the rules (grounding, checkbox rules D13a/D13b, merge, subject join, and since
+rules-2 the SAE reconciliation of D14) and fails if
 that hash is not the one recorded for the current `RULES_VERSION`. So a rule change cannot ship
 under an old version: bump `RULES_VERSION` in `chatmed.extraction` and add its hash below.
 
@@ -20,12 +21,14 @@ import sys
 
 from chatmed import extraction
 
-RULE_MODULES = ("chatmed.extraction",)
+RULE_MODULES = ("chatmed.extraction", "chatmed.agent.reconcile")
 PYTHON = (3, 12)
 
 # One entry per RULES_VERSION ever released. Never edit an existing hash: bump the version.
 RULES_HASHES = {
     "rules-1": "431d274170fc5e86d0771124d2f9cf78d4fba691e8bc8cfd6ed1048dc5bc27c4",
+    # rules-2 (D14): adds chatmed.agent.reconcile (adae record selection, item comparison).
+    "rules-2": "9c65d6c469853771994461c557bfe403e8c1615c6f43de7eae680ff5e1ceb6d0",
 }
 
 

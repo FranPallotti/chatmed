@@ -80,17 +80,40 @@ The tenant databases now hold synthetic CDISC-style ADSL/ADAE data and CIOMS I f
 - AC9 (D13) Extraction prompt mentions column interleaving and OCR noise; prompt version bumped.
 
 ## M3 — Agent loop and API
-- AC1 Tools: `query_document_facts` (read-only over session DuckDB), `get_field_metadata`,
-  2–3 parameterized tenant DB tools; tenant injected from the session.
-- AC2 Agent loop: function calling, max iterations, timeouts, stateless calls, temperature 0 + seed.
-- AC3 Answers include citations (doc sha prefix + page + quote, or table name).
-- AC4 Fallback for questions not covered by fields: page text (BM25 for large docs).
-- AC5 FastAPI endpoints from `docs/architecture.md`, upload limits enforced, request-body logging off.
-- AC6 Tests with a fake model client: a scripted tool-call sequence produces the expected answer.
+Use case for the demo: a safety reviewer uploads a CIOMS report and asks questions that combine it
+with the study data, e.g. "Does this CIOMS match what ADAE has for this subject?" (SAE
+reconciliation), "What treatment arm is the subject in?", "Was the subject hospitalised?".
+- AC1 Tools (tenant injected from the session, never a tool argument):
+  - `query_document_facts`: read-only over the session DuckDB `facts` table.
+  - `get_field_metadata`: the tenant's fields for a document type.
+  - `get_subject(subjid)`: the `adsl` row; only callable with a subject from a `joined` fact (D13).
+  - `list_adverse_events(subjid, serious_only?)`: `adae` rows for that subject.
+  - `reconcile_case(doc_sha)`: deterministic code comparing CIOMS facts with the matching `adae`
+    record (onset date vs `astdt`, seriousness vs `aeser`, action taken vs `aeacn`, outcome);
+    returns per item `match` / `mismatch` / `not_comparable` (e.g. `undeterminable` checkbox).
+- AC2 Agent loop: function calling, max iterations, per-call timeout, stateless calls,
+  temperature 0 + seed + pinned deployment, retries as in M2. Tool errors go back to the model as
+  short codes, never with document text.
+- AC3 Answers are built from tool results: the response carries a structured `facts_used` list
+  (fact/row ids, values, citations: doc sha prefix + page + quote, or table + key) plus the text.
+  The model never states a value that isn't in `facts_used`; a code check rejects answers whose
+  numbers/dates don't appear in `facts_used` and retries once, else returns a safe fallback.
+- AC4 Honesty statuses reach the user: `undeterminable`, `conflict`, `unverified`, `missing`, and
+  join statuses `unmatched` / `ambiguous` / `not_attempted` are stated plainly, never papered over.
+  If the subject isn't `joined`, no study data about any subject is returned.
+- AC5 Fallback for questions not covered by fields: relevant page text (whole text for small
+  docs; in-memory BM25 over pages for large ones, ties broken by page number), quotes still grounded.
+- AC6 FastAPI endpoints from `docs/architecture.md` (create session, upload, ask, close) with a
+  minimal in-memory session holder (M4 hardens it); upload size/page limits; request-body logging off.
 - AC7 Every log path goes through the metadata-only filter: uvicorn's own loggers (run with
   `log_config=None` or route `uvicorn.error`/`uvicorn.access` to our handler), and uncaught
   exceptions (`sys.excepthook`, FastAPI exception handlers). A test raises an exception whose
   message contains document text and proves it doesn't reach any log output.
+- AC8 Tests with a fake model client: scripted tool-call sequences for the three demo questions on
+  the synthetic CIOMS produce the expected `facts_used`; reconciliation reports the expected
+  match/mismatch items (the follow-up fixture's onset `conflict` → `not_comparable`).
+- AC9 Opt-in Azure test (synthetic data only): the three demo questions, 3 runs each → identical
+  `facts_used` across runs (answer wording may differ; the facts may not).
 
 ## M4 — Session lifecycle and guardrails on
 - AC1 `InMemorySessionStore`: TTL sweeper, idempotent `close()` releasing DuckDB and documents.

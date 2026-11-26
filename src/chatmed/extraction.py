@@ -45,7 +45,7 @@ PROMPT_VERSION = "extract-v2"  # v2 (D13): OCR noise, interleaved columns, check
 # subject join). Part of the fingerprint (D6): the same model output can give different facts
 # under different rules. tests/guardrails/test_rules_version.py fails if this module changes
 # without a bump.
-RULES_VERSION = "rules-1"
+RULES_VERSION = "rules-2"  # rules-2: + chatmed.agent.reconcile (D14)
 
 
 class ExtractionError(RuntimeError):
