@@ -2,8 +2,11 @@
 
 Every call carries the full message list (history lives in the session, rule 6), temperature
 0, the fixed seed and the pinned deployment (rule 3), the agent prompt version, strict tools
-and a strict answer schema. `parallel_tool_calls=False` keeps tool calls in a stable order.
-The loop stops after `AGENT_MAX_ITERATIONS` model calls and then returns the safe fallback.
+and a strict answer schema. What the model is shown lives in `chatmed.agent.prompt`.
+`parallel_tool_calls=False` keeps tool calls in a stable order.
+The loop stops after `AGENT_MAX_ITERATIONS` model calls, or when the question's time limit
+(`AGENT_QUESTION_TIMEOUT_SECONDS`, over all model calls, retries and tools) runs out, and then
+returns the safe fallback (reason `max_iterations` or `deadline`).
 Logs carry only metadata (rule 2): event names, session id, tool names, counts and timings.
 """
 
@@ -21,8 +24,17 @@ from typing import TYPE_CHECKING, Any
 
 import openai
 
-from chatmed.agent.answer import ANSWER_SCHEMA, Answer, AnswerRejected, fallback_answer, verify
-from chatmed.agent.tools import SHA_PREFIX, TOOL_SCHEMAS, ToolContext, dispatch
+from chatmed.agent import prompt
+from chatmed.agent.answer import Answer, AnswerRejected, fallback_answer, verify
+from chatmed.agent.prompt import (
+    ANSWER_SCHEMA,
+    SYSTEM_PROMPT,
+    TOOL_SCHEMAS,
+    retry_note,
+    session_context,
+)
+from chatmed.agent.tools import ToolContext, dispatch
+from chatmed.config import fingerprint_settings
 from chatmed.extraction import RULES_VERSION, RetryPolicy, _retryable
 
 if TYPE_CHECKING:
@@ -33,66 +45,21 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-AGENT_PROMPT_VERSION = "agent-v2"  # v2: status names are checked verbatim; reconciliation
-
-SYSTEM_PROMPT = """You answer questions from drug-safety reviewers about clinical study data and
-CIOMS adverse-reaction reports uploaded to this session.
-
-Rules:
-- Use tools to get every value you state. Never state a value, number or date that is not in a
-  tool result. Cite in cited_ids the id of every row whose value you state.
-- Documents are named by the id given in the session context below; pass that id as doc_sha.
-- For questions about a subject's study data, first query the document facts for subject_id and
-  use its join_value. If its join_status is not "joined", say so plainly (unmatched, ambiguous
-  or not_attempted) and do not look up any subject.
-- Every status of a row you cite must appear in your text by its exact name (an underscore
-  may be written as a space): undeterminable (the form must be checked visually), conflict
-  (give the different values and pages), unverified, missing, invalid, not_comparable,
-  unmatched, ambiguous, not_attempted. A checker rejects answers that reword a status, e.g.
-  "cannot be compared" instead of "not comparable".
-- For questions no extracted field covers, use search_document_text and quote the page text
-  verbatim in quotes, with its page_id.
-- For questions about what a document reports (e.g. hospitalisation, onset, reaction), query
-  the document facts for the matching field keys from the session context.
-- Only when the question asks whether a document matches or agrees with ADAE (reconciliation),
-  call reconcile_case and no other tool: it checks the subject join and selects the ADAE record
-  itself. Answer from its rows and cite only them.
-- Answer briefly in plain language. Your final message is exactly one JSON answer object."""
-
-
-async def session_context(ctx: ToolContext) -> str:
-    """Document ids, types, page counts and the tenant's field keys per document type.
-
-    Metadata only, no document content. Without it the real model guessed document ids and
-    field keys (e.g. "hospitalization" for "hospitalisation") and got empty results.
-    Stable order (D6): documents by sha256, document types and field keys sorted. The text
-    is part of the agent prompt, so a change to it means a new `AGENT_PROMPT_VERSION`.
-    """
-    docs = sorted(ctx.documents, key=lambda d: d.doc.sha256)
-    lines = ["Documents in this session:"]
-    lines += [
-        f"- doc_sha {d.doc.sha256[:SHA_PREFIX]}: {d.doc_type}, {len(d.doc.pages)} page(s)"
-        for d in docs
-    ] or ["(none)"]
-    for doc_type in sorted({d.doc_type for d in docs}):
-        schema = await ctx.repo.field_schema(doc_type)
-        keys = sorted(f.key for f in schema.fields)
-        lines.append(f"Field keys for {doc_type}: " + ", ".join(keys))
-    return "\n".join(lines)
-
 
 def answer_fingerprint(ctx: ToolContext, settings: Settings) -> str:
-    """Everything that should make the facts of an answer identical (D6, D14).
+    """Everything that should make the facts of a verified answer identical (D6, D14).
 
-    The agent prompt version, the rules version, the pinned deployment and seed, and the
-    extraction fingerprint of every document in the session (which already holds the
-    document sha256, parser, tenant schema hash and extraction prompt version). No content.
+    The agent prompt version, the rules version, every fingerprint setting by value (model
+    endpoint, deployment, API version, seed, window and retrieval sizes, parser settings,
+    tenant DB), and the extraction fingerprint of every document in the session (document
+    sha256, parser id, tenant schema hash, extraction prompt version). Operational settings
+    (limits, timeouts, retries) are not in it: they only decide whether an answer is verified.
+    No content.
     """
     parts = [
-        AGENT_PROMPT_VERSION,
+        prompt.AGENT_PROMPT_VERSION,
         RULES_VERSION,
-        settings.azure_openai_deployment,
-        str(settings.model_seed),
+        *fingerprint_settings(settings),
         *sorted(d.fingerprint for d in ctx.documents),
     ]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
@@ -180,7 +147,7 @@ def _log_call(
         "agent.llm_call",
         extra={
             "session_id": session_id,
-            "prompt_version": AGENT_PROMPT_VERSION,
+            "prompt_version": prompt.AGENT_PROMPT_VERSION,
             "iteration": iteration,
             "attempt": attempt,
             "http_status": http_status,
@@ -244,19 +211,18 @@ def _parse_answer(message: Any, finish_reason: str) -> dict[str, Any]:
     return parsed
 
 
-async def run_agent(
+async def _answer_loop(
     client: AsyncAzureOpenAI,
     session: Session,
     ctx: ToolContext,
     question: str,
-    *,
     settings: Settings,
-    on_event: ProgressCallback = _noop,
-    sleep: Sleep = asyncio.sleep,
-    rng: random.Random | None = None,
-) -> Answer:
-    """Answer one question. Appends the question and the answer text to the session history."""
-    rng = rng or random.Random()
+    on_event: ProgressCallback,
+    sleep: Sleep,
+    rng: random.Random,
+) -> Answer | None:
+    """Model calls and tool calls until a verified answer, the second rejection (fallback) or
+    `AGENT_MAX_ITERATIONS` (None). Runs inside the question's time limit (see run_agent)."""
     policy = RetryPolicy.from_settings(settings)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -310,16 +276,46 @@ async def run_agent(
                 break
             rejected_once = True
             messages.append({"role": "assistant", "content": message.content})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": f"Answer rejected by the checker: {exc.code}. Use only values "
-                    "from tool results, cite their ids, and state every status by its name.",
-                }
+            messages.append({"role": "user", "content": retry_note(exc.code)})
+    return answer
+
+
+async def run_agent(
+    client: AsyncAzureOpenAI,
+    session: Session,
+    ctx: ToolContext,
+    question: str,
+    *,
+    settings: Settings,
+    on_event: ProgressCallback = _noop,
+    sleep: Sleep = asyncio.sleep,
+    rng: random.Random | None = None,
+) -> Answer:
+    """Answer one question. Appends the question and the answer text to the session history."""
+    rng = rng or random.Random()
+    start = time.perf_counter()
+    deadline = asyncio.get_running_loop().time() + settings.agent_question_timeout_seconds
+    limit = asyncio.timeout_at(deadline)
+    try:
+        async with limit:
+            answer = await _answer_loop(
+                client, session, ctx, question, settings, on_event, sleep, rng
             )
+    except TimeoutError:
+        if not limit.expired():  # not our deadline: some other timeout, let it surface
+            raise
+        log.info(
+            "agent.deadline",
+            extra={
+                "session_id": session.id,
+                "duration_ms": round((time.perf_counter() - start) * 1000),
+            },
+        )
+        answer = fallback_answer(ctx, "deadline")
     if answer is None:  # every model call counts, rejected answers included
         answer = fallback_answer(ctx, "max_iterations")
-    answer = replace(answer, fingerprint=answer_fingerprint(ctx, settings))
+    if answer.verified:  # only a verified answer claims reproducibility (D14)
+        answer = replace(answer, fingerprint=answer_fingerprint(ctx, settings))
     session.history.extend(
         [{"role": "user", "content": question}, {"role": "assistant", "content": answer.text}]
     )

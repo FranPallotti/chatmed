@@ -291,8 +291,8 @@ async def _answer_stream(
             await queue.put(
                 {
                     "event": "answer",
-                    "verified": answer.verified,
-                    "reason": answer.reason,
+                    "outcome": answer.outcome,  # verified | fallback (D14)
+                    "reason": answer.reason,  # fallback only: a fixed code
                     "text": answer.text,
                     "facts_used": answer.facts_used,
                     "fingerprint": answer.fingerprint,

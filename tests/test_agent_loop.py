@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -384,17 +386,53 @@ def _item(values: dict[str, Any], citation: dict[str, Any] | None = None) -> Evi
         ("Age 74", ["74"]),
         ("Onset 2026-06-21", ["2026-06-21"]),
         ("Dose 20.5 mg", ["20.5"]),
+        ("Onset June 12, 2026 (12-JUN-2026, 12/06/2026, 12 June).", []),
+        ("Onset June 6, 2026.", ["June 6, 2026"]),  # 6 and 2026 occur, the date does not
+        ("Onset 13/06/2026", ["13/06/2026"]),
+        ("Onset 31/02/2026", ["31/02/2026"]),  # not a real date
+        ("Onset on June 13", ["June 13"]),
+        ("Doc 7652, row 457661", ["457661", "7652"]),  # digits of a sha prefix are not values
     ],
 )
 def test_number_check(text: str, bad: list[str]) -> None:
     items = [
-        _item({"value": "47", "join_value": "01001-004"}, {"page": 1}),
+        _item(
+            {"doc": "7652ea457661", "value": "47", "join_value": "01001-004"},
+            {"doc": "7652ea457661", "page": 1, "key": "457661"},
+        ),
         _item({"value": "2026-06-12", "dose": "20 mg"}),
     ]
     assert unsupported_numbers(text, items) == bad
 
 
 # ---------------------------------------------------------------- AC4: statuses stated plainly
+
+
+@pytest.mark.parametrize(
+    ("text", "unstated"),
+    [
+        ("There is a conflict between pages 1 and 2.", []),
+        ("The values are conflicting.", []),
+        ("There is no conflict in the onset date.", ["conflict"]),
+        ("The onset is not in conflict.", ["conflict"]),
+        ("Without any conflict.", ["conflict"]),
+        ("No conflict on page 1, but there is a conflict on page 2.", []),
+        ("The conflictless report.", ["conflict"]),  # whole words only
+    ],
+)
+def test_negated_status_is_not_stated(text: str, unstated: list[str]) -> None:
+    assert unstated_statuses(text, [_item({"status": "conflict"})]) == unstated
+
+
+def test_not_comparable_is_stated_despite_its_own_not() -> None:
+    item = _item({"status": "not_comparable", "reason": "no_document_field"})
+    for text in (
+        "Action taken is not comparable.",
+        "There is no document field, so it is not comparable.",
+        "(status: not_comparable)",
+    ):
+        assert unstated_statuses(text, [item]) == [], text
+    assert unstated_statuses("Action taken cannot be compared.", [item]) == ["not_comparable"]
 
 
 def test_status_check_names() -> None:
@@ -513,15 +551,54 @@ async def test_answer_fingerprint_is_stable_and_versioned(
         sha = setup.shas["cioms_initial.pdf"]
         prints.append((await ask(setup, ScriptedModelClient(arm_script(sha)), "Arm?")).fingerprint)
     assert prints[0] == prints[1] and prints[0] is not None and len(prints[0]) == 64
-    monkeypatch.setattr("chatmed.agent.loop.AGENT_PROMPT_VERSION", "agent-v999")
+    monkeypatch.setattr("chatmed.agent.prompt.AGENT_PROMPT_VERSION", "agent-v999")
     setup = await setup_session(recorded, ["cioms_initial.pdf"])
     sha = setup.shas["cioms_initial.pdf"]
     changed = await ask(setup, ScriptedModelClient(arm_script(sha)), "Arm?")
     assert changed.fingerprint != prints[0]
-    # the fallback carries it too
+    # a fallback claims no reproducibility: outcome + reason, no fingerprint (D14)
     setup = await setup_session(recorded, ["cioms_initial.pdf"])
     fallback = await ask(setup, ScriptedModelClient([final("x", ["nope"])] * 2), "Arm?")
-    assert not fallback.verified and fallback.fingerprint is not None
+    assert (fallback.outcome, fallback.reason) == ("fallback", "unknown_cited_id")
+    assert fallback.fingerprint is None
+
+
+async def _arm_fingerprint(recorded: FakeModelClient, **settings: Any) -> str | None:
+    setup = await setup_session(recorded, ["cioms_initial.pdf"], settings=make_settings(**settings))
+    sha = setup.shas["cioms_initial.pdf"]
+    answer = await ask(setup, ScriptedModelClient(arm_script(sha)), "Arm?")
+    assert answer.outcome == "verified"
+    return answer.fingerprint
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("agent_fulltext_max_chars", 1234),
+        ("agent_bm25_top_k", 5),
+        ("azure_openai_api_version", "2099-01-01"),
+        ("tenant_db_dsn_template", "postgresql://other_{tenant}@db2/tenant_{tenant}"),
+    ],
+)
+async def test_fingerprint_settings_change_the_fingerprint(
+    recorded: FakeModelClient, name: str, value: Any
+) -> None:
+    assert await _arm_fingerprint(recorded, **{name: value}) != await _arm_fingerprint(recorded)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("agent_max_iterations", 12),
+        ("agent_question_timeout_seconds", 99.0),
+        ("llm_max_attempts", 2),
+        ("llm_timeout_seconds", 5.0),
+    ],
+)
+async def test_operational_settings_do_not_change_the_fingerprint(
+    recorded: FakeModelClient, name: str, value: Any
+) -> None:
+    assert await _arm_fingerprint(recorded, **{name: value}) == await _arm_fingerprint(recorded)
 
 
 async def test_session_context_field_keys_are_sorted(recorded: FakeModelClient) -> None:
@@ -605,6 +682,57 @@ async def test_a_reworded_status_is_rejected(recorded: FakeModelClient) -> None:
 
 
 def test_prompt_tells_the_model_statuses_are_checked_by_name() -> None:
-    from chatmed.agent.loop import SYSTEM_PROMPT
+    from chatmed.agent.prompt import SYSTEM_PROMPT
 
     assert "exact name" in SYSTEM_PROMPT and "cannot be compared" in SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------- AC2: question time limit
+
+
+class _SlowClient:
+    """Answers every call after `delay` seconds; counts the calls."""
+
+    def __init__(self, delay: float) -> None:
+        self.delay = delay
+        self.calls = 0
+        self.chat = SimpleNamespace(completions=self)
+
+    async def create(self, **_request: Any) -> Any:
+        self.calls += 1
+        await asyncio.sleep(self.delay)
+        raise AssertionError("the time limit should have stopped this call")
+
+
+async def test_question_time_limit_ends_with_the_fallback(recorded: FakeModelClient) -> None:
+    settings = make_settings(agent_question_timeout_seconds=0.2)
+    setup = await setup_session(recorded, ["cioms_initial.pdf"], settings=settings)
+    client = _SlowClient(delay=30)
+    started = time.perf_counter()
+    answer = await ask(setup, client, "Arm?")  # type: ignore[arg-type]
+    assert time.perf_counter() - started < 5
+    assert (answer.outcome, answer.reason) == ("fallback", "deadline")
+    assert answer.fingerprint is None
+    assert setup.session.history[-1]["content"] == answer.text
+
+
+async def test_time_limit_covers_retries_and_backoff(recorded: FakeModelClient) -> None:
+    """429s with real backoff sleeps: the limit still ends the question on time."""
+    settings = make_settings(agent_question_timeout_seconds=0.3, llm_max_attempts=10)
+    setup = await setup_session(recorded, ["cioms_initial.pdf"], settings=settings)
+    client = ScriptedModelClient([_status_error(429)] * 10)
+
+    async def real_sleep(_seconds: float) -> None:
+        await asyncio.sleep(1)
+
+    started = time.perf_counter()
+    answer = await run_agent(
+        client,  # type: ignore[arg-type]
+        setup.session,
+        setup.ctx(),
+        "Arm?",
+        settings=setup.settings,
+        sleep=real_sleep,
+    )
+    assert time.perf_counter() - started < 5
+    assert answer.reason == "deadline"

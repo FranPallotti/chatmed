@@ -263,7 +263,9 @@ def test_ask_streams_metadata_events_then_the_verified_answer(
         out = events(resp)
         assert [e["event"] for e in out] == ["started", "tool", "answer"]
         assert out[1] == {"event": "tool", "name": "query_document_facts", "iteration": 1}
-        assert out[2]["verified"] is True
+        assert (out[2]["outcome"], out[2]["reason"]) == ("verified", None)
+        assert len(out[2]["fingerprint"]) == 64
+        assert "verified" not in out[2]  # one field says it: outcome
         assert [f["id"] for f in out[2]["facts_used"]] == [f"fact:{sha}:hospitalisation:1"]
         client.delete(f"/sessions/{sid}")
     for record in caplog.records:  # no body, question, value or answer in any log record
@@ -286,3 +288,18 @@ def test_model_failure_is_an_error_event(recorded: FakeModelClient) -> None:
             {"event": "started"},
             {"event": "error", "code": "model_rejected"},
         ]
+
+
+def test_fallback_answer_event_has_outcome_and_reason_but_no_fingerprint(
+    recorded: FakeModelClient,
+) -> None:
+    steps = [final("Arm is placebo.", ["adsl:01001-002"]), final("Arm is placebo.", ["x"])]
+    with make_client(recorded, steps) as client:
+        sid = new_session(client)
+        (answer,) = [
+            e
+            for e in events(client.post(f"/sessions/{sid}/ask", json={"question": "Arm?"}))
+            if e["event"] == "answer"
+        ]
+    assert (answer["outcome"], answer["reason"]) == ("fallback", "unknown_cited_id")
+    assert answer["fingerprint"] is None

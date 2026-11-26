@@ -283,67 +283,8 @@ async def search_document_text(ctx: ToolContext, query: str, doc_sha: str | None
     return {"pages": pages}
 
 
-# ---------------------------------------------------------------- schemas + dispatch
-
-
-def _fn(name: str, description: str, props: dict[str, Any]) -> dict[str, Any]:
-    """Strict function tool: every property required, no extra properties."""
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "strict": True,
-            "parameters": {
-                "type": "object",
-                "properties": props,
-                "required": sorted(props),
-                "additionalProperties": False,
-            },
-        },
-    }
-
-
-_NULLABLE_STR = {"type": ["string", "null"]}
-TOOL_SCHEMAS: list[dict[str, Any]] = [
-    _fn(
-        "query_document_facts",
-        "Verified facts extracted from the session's documents, with status, page and quote. "
-        "doc_sha: a document id prefix or null for all; field_keys: null for all fields.",
-        {
-            "doc_sha": _NULLABLE_STR,
-            "field_keys": {"type": ["array", "null"], "items": {"type": "string"}},
-        },
-    ),
-    _fn(
-        "get_field_metadata",
-        "The fields defined for a document type (key, label, description, type).",
-        {"doc_type": {"type": "string"}},
-    ),
-    _fn(
-        "get_subject",
-        "The study subject (ADSL row: arm, treatment, age, sex, dates). subjid: the join_value "
-        "of a subject_id fact whose join_status is joined; other subjects are refused.",
-        {"subjid": {"type": "string"}},
-    ),
-    _fn(
-        "list_adverse_events",
-        "The subject's adverse events (ADAE rows). Same subject rule as get_subject.",
-        {"subjid": {"type": "string"}, "serious_only": {"type": "boolean"}},
-    ),
-    _fn(
-        "reconcile_case",
-        "Compare a CIOMS document with the matching ADAE record: onset date, seriousness, "
-        "action taken, outcome. Returns match / mismatch / not_comparable per item.",
-        {"doc_sha": {"type": "string"}},
-    ),
-    _fn(
-        "search_document_text",
-        "Page text for questions the extracted fields do not cover. Cite it with quotes.",
-        {"query": {"type": "string"}, "doc_sha": _NULLABLE_STR},
-    ),
-]
-TOOL_NAMES = frozenset(t["function"]["name"] for t in TOOL_SCHEMAS)
+# ---------------------------------------------------------------- dispatch
+# (the tool schemas the model sees are in chatmed.agent.prompt)
 
 
 async def dispatch(ctx: ToolContext, name: str, arguments: str) -> dict[str, Any]:

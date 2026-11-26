@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     agent_max_completion_tokens: int = Field(default=1500, gt=0)
     agent_fulltext_max_chars: int = Field(default=20_000, gt=0)  # above this: BM25 over pages
     agent_bm25_top_k: int = Field(default=3, ge=1, le=10)
+    # Whole question (all model calls, retries, tools): below the 30 s verified-answer target
+    agent_question_timeout_seconds: float = Field(default=25.0, gt=0)
 
     # Parsing (fixed per deployment; part of the reproducibility fingerprint via parser_id)
     parser: Literal["routing", "pdfium"] = "routing"
@@ -102,6 +104,61 @@ class Settings(BaseSettings):
         if _DSN_PASSWORD_PARAM.search(dsn) or ("://" in dsn and urlsplit(dsn).password):
             raise ValueError("TENANT_DB_DSN_TEMPLATE must not contain a password")
         return self
+
+
+# Every Settings field is in exactly one of these two sets (tests/test_config.py).
+#
+# Fingerprint settings can change facts or answers for the same inputs, so their values go
+# into the answer fingerprint (D6, D14). Parsing settings are also in parser_id.
+FINGERPRINT_SETTINGS: frozenset[str] = frozenset(
+    {
+        "azure_openai_endpoint",  # with the deployment name, identifies the model
+        "azure_openai_deployment",
+        "azure_openai_api_version",  # request semantics (structured outputs, tools)
+        "model_seed",
+        "extraction_max_chars",  # extraction window size: facts are merged across windows
+        "agent_fulltext_max_chars",  # whole text vs BM25 for search_document_text
+        "agent_bm25_top_k",  # how many pages the model sees
+        "parser",  # page text (also in parser_id)
+        "ocr_backend",
+        "ocr_dpi",
+        "ocr_lang",
+        "tenant_db_dsn_template",  # which databases the tenant data comes from
+    }
+)
+
+# Operational settings only decide whether a verified answer is produced (limits, retries,
+# timeouts, admission) or how the service runs; with the same inputs they cannot change the
+# facts of a verified answer. They stay out of the fingerprint: a run they cut short ends as
+# outcome "fallback" (or an error), and only verified answers claim reproducibility (D14).
+OPERATIONAL_SETTINGS: frozenset[str] = frozenset(
+    {
+        "llm_timeout_seconds",
+        "llm_max_attempts",
+        "llm_backoff_base_seconds",
+        "llm_backoff_max_seconds",
+        "extraction_max_completion_tokens",  # truncated output is an error, never partial facts
+        "agent_max_iterations",
+        "agent_max_completion_tokens",  # truncated answer is an error
+        "agent_question_timeout_seconds",
+        "docintel_endpoint",  # which resource; the model id is fixed and in parser_id
+        "tesseract_cmd",  # where the binary is; its version is in parser_id
+        "session_store",
+        "session_ttl_seconds",
+        "max_docs_per_session",  # admission limits: reject, never change facts
+        "max_pages_per_doc",
+        "max_upload_mb",
+        "duckdb_memory_limit",  # no spill to disk: over the limit a query fails
+        "tenants",  # allow-list (admission)
+        "log_level",
+    }
+)
+
+
+def fingerprint_settings(settings: Settings) -> list[str]:
+    """`name=value` of every fingerprint setting, sorted by name: the settings part of both
+    fingerprints (extraction and answer, D6). Values only, never secrets (there are none)."""
+    return [f"{name}={getattr(settings, name)}" for name in sorted(FINGERPRINT_SETTINGS)]
 
 
 @lru_cache(maxsize=1)

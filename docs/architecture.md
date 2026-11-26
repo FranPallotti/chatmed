@@ -102,6 +102,9 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
   row limit, timeout. Parsed/validated before execution (e.g. `sqlglot`).
 
 ### Agent (`src/chatmed/agent/`)
+- `prompt.py`: everything the model is shown (system prompt, session context, retry note,
+  tool and answer schemas), versioned by `AGENT_PROMPT_VERSION` and hashed as one module. All
+  other agent modules are under `RULES_VERSION` (D6).
 - `loop.py`: code-first loop with function calling over stateless chat completions (no Agent
   Service threads, no `store=True`). Every call: full message list, temperature 0, seed, pinned
   deployment, `AGENT_PROMPT_VERSION`, strict tools, strict answer schema,
@@ -128,22 +131,25 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 - `answer.py`: the model ends with `{text, cited_ids, quotes}`. Code builds `facts_used` from the
   registry (values never come from the model), grounds quotes against the page text
   (`ground_quote`, stored as full lines, D13c), rejects text with numbers/dates not in
-  `facts_used`, and rejects text that cites a row with an honesty status (`undeterminable`,
+  `facts_used` (dates compared as dates in any written form; sha prefixes and row keys are
+  not number sources), and rejects text that cites a row with an honesty status (`undeterminable`,
   `conflict`, `unverified`, `missing`, `invalid`, `unmatched`, `ambiguous`, `not_attempted`,
-  `not_comparable`) without naming it. Output that is not exactly one JSON object (the real
+  `not_comparable`) without naming it (whole words; a negated mention such as "no conflict"
+  does not count). Output that is not exactly one JSON object (the real
   model once sent two) is also a rejection. One retry, then a deterministic fallback listing
   the retrieved rows with their statuses. A cited `recon:` row brings in the whole
   reconciliation of its document, the compared `adae` record and the document's joined
-  `subject_id` fact, which `reconcile_case` registers itself (D14). Each answer carries a
-  fingerprint (agent prompt version, rules version, deployment, seed, document fingerprints).
+  `subject_id` fact, which `reconcile_case` registers itself (D14). A verified answer carries
+  a fingerprint (agent prompt version, rules version, `FINGERPRINT_SETTINGS` values, document
+  fingerprints); a fallback carries outcome `fallback` and a reason code instead.
 
 ### API (`src/chatmed/api.py`)
 - `POST /sessions {"tenant_id"}` → session id (tenant checked against `TENANTS`, D14)
 - `POST /sessions/{id}/documents` (multipart `file` + `doc_type`) → sha256, page count,
   parser id, fingerprint, counts per status, join status (no values)
 - `POST /sessions/{id}/ask {"question"}` → NDJSON: `started`, metadata-only `tool` events,
-  then one `answer` event (`verified`, `reason`, `text`, `facts_used`, `fingerprint`) or an
-  `error` code (D14)
+  then one `answer` event (`outcome` verified|fallback, `reason`, `text`, `facts_used`,
+  `fingerprint` for verified answers) or an `error` code (D14)
 - `DELETE /sessions/{id}` → idempotent wipe (204)
 - The multipart body is streamed into memory with a byte counter (limit `MAX_UPLOAD_MB` +
   64 KiB): an oversized Content-Length is refused before reading, and the first chunk past the

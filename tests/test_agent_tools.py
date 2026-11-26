@@ -7,8 +7,9 @@ from typing import Any
 
 import pytest
 
+from chatmed.agent.prompt import TOOL_SCHEMAS
 from chatmed.agent.retrieval import bm25, relevant_pages
-from chatmed.agent.tools import TOOL_SCHEMAS, dispatch
+from chatmed.agent.tools import dispatch
 from chatmed.models import ParsedDocument, ParsedPage
 from tests.agent_support import AgentSetup, setup_session
 from tests.fakes import FakeModelClient

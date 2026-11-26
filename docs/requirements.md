@@ -31,8 +31,9 @@ the metadata of the fields each document type can contain, not the document valu
 - **Reproducibility:** identical inputs and configuration → identical facts; measured by a test.
 - **Security:** read-only DB access, tenant injected by code, Entra ID auth, no secrets in code.
 - **Latency (POC targets):** extraction < 60 s for a 30-page digital PDF; answers streamed as
-  NDJSON events (D14): first (progress) event < 2 s, verified answer < 30 s. Answer text is not
-  streamed token by token, because it must pass the code check first.
+  NDJSON events (D14): first (progress) event < 2 s, verified answer < 30 s (enforced per
+  question by `AGENT_QUESTION_TIMEOUT_SECONDS`, default 25 s, then the fallback). Answer text
+  is not streamed token by token, because it must pass the code check first.
 - **Scale (POC):** tens of users, one replica, ≤ 5 documents and ≤ 30 pages per document
   per session (configurable; reject above limits with a clear error).
 

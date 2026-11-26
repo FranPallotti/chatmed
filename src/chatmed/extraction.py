@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import openai
 
+from chatmed.config import fingerprint_settings
 from chatmed.models import ParsedDocument, ParsedPage
 
 if TYPE_CHECKING:  # keep the pure parts importable/testable without these at runtime
@@ -41,11 +42,18 @@ if TYPE_CHECKING:  # keep the pure parts importable/testable without these at ru
 log = logging.getLogger(__name__)
 
 PROMPT_VERSION = "extract-v2"  # v2 (D13): OCR noise, interleaved columns, checkbox fields
-# Version of the code that turns model output into facts (grounding, checkbox rules, merge,
-# subject join). Part of the fingerprint (D6): the same model output can give different facts
-# under different rules. tests/guardrails/test_rules_version.py fails if this module changes
-# without a bump.
-RULES_VERSION = "rules-2"  # rules-2: + chatmed.agent.reconcile (D14)
+# Version of the code that decides output from the same inputs: parsing, grounding, checkbox
+# rules, merge, subject join, tenant queries, tools, reconciliation, the answer checker and
+# the agent loop (module list in D6). Part of both fingerprints (D6): the same model output
+# can give different facts under different rules. tests/guardrails/test_rules_version.py
+# fails if any of those modules changes without a bump.
+# rules-2: + chatmed.agent.reconcile (D14)
+# rules-3: + answer checker, tools (facts_used closure, printed-id mapping), retrieval, loop,
+#          tenant repository and parsing: every output-deciding module (M3 review)
+# rules-4: answer fingerprint over FINGERPRINT_SETTINGS values; outcome verified|fallback,
+#          fingerprint on verified answers only (D14)
+# rules-5: extraction fingerprint over FINGERPRINT_SETTINGS values too (D6)
+RULES_VERSION = "rules-5"
 
 
 class ExtractionError(RuntimeError):
@@ -756,18 +764,22 @@ class ExtractionResult:
     system_fingerprints: tuple[str | None, ...]  # to detect backend model changes
 
 
-def fingerprint(doc: ParsedDocument, schema: DocTypeSchema, deployment: str, seed: int) -> str:
-    """Everything that should make the output identical. No document content inside."""
+def fingerprint(doc: ParsedDocument, schema: DocTypeSchema, settings: Settings) -> str:
+    """Everything that should make the output identical. No document content inside.
+
+    Document sha256 and parser id, the tenant's schema hash, the prompt and rules versions,
+    and every fingerprint setting by value (model endpoint, deployment, API version, seed,
+    `EXTRACTION_MAX_CHARS`, ...; D6). Operational settings are not in it.
+    """
     parts = [
         doc.sha256,
         doc.parser_id,
         schema.tenant_id,
         schema.doc_type,
         schema.schema_hash,
-        deployment,
         PROMPT_VERSION,
         RULES_VERSION,
-        str(seed),
+        *fingerprint_settings(settings),
     ]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
@@ -807,7 +819,7 @@ async def extract_document(
     )
     return ExtractionResult(
         facts=facts,
-        fingerprint=fingerprint(doc, schema, settings.azure_openai_deployment, settings.model_seed),
+        fingerprint=fingerprint(doc, schema, settings),
         system_fingerprints=tuple(fps),
     )
 

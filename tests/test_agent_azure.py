@@ -2,7 +2,8 @@
 
 The three demo questions, 3 runs each, each run in a fresh session (new extraction, new agent
 loop) → identical `facts_used` across runs. The answer wording may differ; the facts may not.
-Each answer must also verify on the first attempt (no `agent.answer_rejected`).
+Only verified answers claim reproducibility, so only those are compared (D14); on top, the M3
+target is that every run verifies on the first attempt (no `agent.answer_rejected`).
 Skipped by default. Run with: uv run pytest -m azure tests/test_agent_azure.py
 Needs `.env` with the endpoint/deployment and an Entra ID login (DefaultAzureCredential).
 The tenant DB is the fake repository that mirrors the acme seed (tests/fakes.py).
@@ -11,11 +12,10 @@ The tenant DB is the fake repository that mirrors the acme seed (tests/fakes.py)
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import pytest
 
-from chatmed.agent import ToolContext, run_agent
+from chatmed.agent import Answer, ToolContext, run_agent
 from chatmed.config import Settings
 from chatmed.extraction import extract_for_tenant, load_facts, make_client
 from chatmed.parsing import PdfiumParser
@@ -45,7 +45,8 @@ class _Rejections(logging.Handler):
             self.codes.append(str(record.__dict__.get("status")))
 
 
-async def _run(question: str) -> tuple[str | None, list[dict[str, Any]]]:
+async def _run(question: str) -> tuple[Answer, list[str]]:
+    """One fresh session: (the answer, the checker's rejection codes)."""
     settings = Settings()  # type: ignore[call-arg]
     client = make_client(settings.azure_openai_endpoint, settings.azure_openai_api_version)
     store = InMemorySessionStore(max_docs=5, duckdb_memory_limit="256MB")
@@ -71,9 +72,7 @@ async def _run(question: str) -> tuple[str | None, list[dict[str, Any]]]:
             answer = await run_agent(client, session, ctx, question, settings=settings)
         finally:
             agent_log.removeHandler(rejections)
-        assert answer.verified, answer.reason
-        assert rejections.codes == [], "not verified on the first attempt"
-        return answer.fingerprint, answer.facts_used
+        return answer, rejections.codes
     finally:
         store.close(session.id)
         await client.close()
@@ -82,7 +81,12 @@ async def _run(question: str) -> tuple[str | None, list[dict[str, Any]]]:
 @pytest.mark.parametrize("question", QUESTIONS)
 async def test_demo_question_gives_identical_facts_used(question: str) -> None:
     runs = [await _run(question) for _ in range(RUNS)]
-    assert runs[0][1], "the answer used no facts"
-    for fingerprint, facts_used in runs[1:]:
-        assert fingerprint == runs[0][0]  # same inputs ...
-        assert facts_used == runs[0][1]  # ... same facts
+    # Reproducibility is claimed for verified answers only (D14): compare those.
+    verified = [answer for answer, _ in runs if answer.outcome == "verified"]
+    assert len(verified) >= 2, [(a.outcome, a.reason) for a, _ in runs]
+    assert verified[0].facts_used, "the answer used no facts"
+    for other in verified[1:]:
+        assert other.fingerprint == verified[0].fingerprint  # same inputs ...
+        assert other.facts_used == verified[0].facts_used  # ... same facts
+    # The M3 target on top: every run verified, and on the first attempt.
+    assert [(a.outcome, a.reason, codes) for a, codes in runs] == [("verified", None, [])] * RUNS
