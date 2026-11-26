@@ -63,5 +63,10 @@ Not part of any tenant seed; kept because the M1 parser tests use them.
 - Digital fixtures: byte for byte (fpdf2 with a pinned creation date and built-in fonts).
 - Image-only fixtures (`scanned_lab_report.pdf`, `mixed_report.pdf`, `cioms_initial_scanned.pdf`):
   the embedded raster and its compression can differ between Windows and Linux, so the bytes are
-  not compared. Instead: same page count, the image-only pages have no text layer, and each page
-  rendered at a fixed DPI in grayscale has the same size and a mean pixel difference below 1%.
+  not compared. Instead:
+  - **Content:** `build_pdf` stores a sha256 of the fixture's source (page lines, scanned pages,
+    layout, scan DPI) in the PDF Keywords (`source-sha256:...`); it must match the generator.
+    Pixels cannot do this job: changing one digit of the form changes only ~0.001% of the pixels.
+  - **Rendering:** same page count, no text layer on image-only pages, and each page rendered at
+    72 DPI in grayscale has the same size and a mean pixel difference below 1%. This catches a
+    wrong or broken raster and tolerates platform differences in font rasterization.

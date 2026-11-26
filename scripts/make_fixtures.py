@@ -17,6 +17,8 @@ Two families of fixtures (see `fixtures/README.md` for every value):
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -199,14 +201,46 @@ def _add_scanned_page(pdf: FPDF, lines: list[str], layout: Layout = Layout()) ->
     pdf.image(image, x=0, y=0, w=pdf.w, h=pdf.h)
 
 
+SOURCE_KEY = "source-sha256:"
+
+
+def source_fingerprint(pages: list[list[str]], scanned: frozenset[int], layout: Layout) -> str:
+    """Hash of everything a fixture is built from: page lines, which pages are scanned, layout.
+
+    Stored in the PDF Keywords of fixtures with image-only pages. Their raster bytes differ
+    across platforms and a one-character edit changes only ~0.001% of the pixels, so the
+    committed-vs-generated check compares this hash instead (see fixtures/README.md).
+    """
+    source = {
+        "pages": pages,
+        "scanned": sorted(scanned),
+        "layout": [layout.size, layout.spacing],
+        "scan_dpi": SCAN_DPI,
+    }
+    data = json.dumps(source, sort_keys=True, ensure_ascii=True).encode()
+    return hashlib.sha256(data).hexdigest()
+
+
 def build_pdf(
     pages: list[list[str]], scanned: frozenset[int] = frozenset(), layout: Layout = Layout()
 ) -> bytes:
     """One PDF; pages whose 1-based number is in `scanned` are image-only."""
     pdf = _new_pdf()
+    if scanned:
+        pdf.set_keywords(SOURCE_KEY + source_fingerprint(pages, scanned, layout))
     for number, lines in enumerate(pages, start=1):
         (_add_scanned_page if number in scanned else _add_text_page)(pdf, lines, layout)
     return bytes(pdf.output())
+
+
+def read_source_fingerprint(pdf_bytes: bytes) -> str | None:
+    """The fingerprint stored by `build_pdf`, or None if the PDF has none."""
+    doc = pdfium.PdfDocument(pdf_bytes)
+    try:
+        keywords = doc.get_metadata_dict().get("Keywords", "")
+    finally:
+        doc.close()
+    return keywords.removeprefix(SOURCE_KEY) if keywords.startswith(SOURCE_KEY) else None
 
 
 SCANNED_FIXTURES = frozenset(

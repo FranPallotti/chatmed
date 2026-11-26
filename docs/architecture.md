@@ -39,8 +39,9 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
   `tesseract-5.4.0-lept1.84.1-dpi300-eng-psm3-data<sha12>`.
   The `.traineddata` directory is the first one holding every configured language among:
   `TESSDATA_PREFIX` (or its `tessdata/`), the path printed by `tesseract --list-langs`
-  (Tesseract 5 only), then `/usr/share/tesseract-ocr/{5,4.00}/tessdata` and `/usr/share/tessdata`.
-  Works with Tesseract 4 and 5.
+  (Tesseract 5 only), then the package directory of the same major version
+  (`/usr/share/tesseract-ocr/5/tessdata` or `.../4.00/tessdata`) and `/usr/share/tessdata`.
+  Works with Tesseract 4 and 5. The M5 image should set `TESSDATA_PREFIX` explicitly.
 - Document Intelligence: if deleting the analyze result fails, `docintel_delete_failed` is logged
   (doc sha256 only), the original error is kept, and a successful parse is turned into an error.
   The backend is fixed per deployment/tenant config, never per request.

@@ -26,13 +26,14 @@ DATA_HASH_LEN = 12  # hex chars of the language-data hash kept in parser_id
 _TESSERACT_VERSION = re.compile(r"^tesseract v?(\d\S*)", re.MULTILINE)
 _LEPTONICA = re.compile(r"leptonica-(\S+)")
 _TESSDATA_DIR = re.compile(r'"([^"]+)"')  # 'List of available languages in "<dir>" (n):'
-# Package locations on Debian/Ubuntu (the M5 image), newest first. Tesseract 4 does not print
-# its data directory, so these are needed there.
-SYSTEM_TESSDATA_DIRS = (
-    Path("/usr/share/tesseract-ocr/5/tessdata"),
-    Path("/usr/share/tesseract-ocr/4.00/tessdata"),
-    Path("/usr/share/tessdata"),
-)
+# Package locations by Tesseract major version (Debian/Ubuntu, the M5 image; then the generic
+# path other distros use). Tesseract 4 does not print its data directory, so these are needed
+# there; keyed by version so a Tesseract 4 binary is never fingerprinted with version 5 models
+# when both packages are installed.
+SYSTEM_TESSDATA_DIRS: dict[str, tuple[Path, ...]] = {
+    "5": (Path("/usr/share/tesseract-ocr/5/tessdata"), Path("/usr/share/tessdata")),
+    "4": (Path("/usr/share/tesseract-ocr/4.00/tessdata"), Path("/usr/share/tessdata")),
+}
 
 
 class TesseractNotAvailable(ParserError):
@@ -60,12 +61,14 @@ def format_parser_id(install: TesseractInstall, *, dpi: int, lang: str) -> str:
     )
 
 
-def find_tessdata_dir(langs: list[str], *, listed: str | None, prefix: str | None) -> Path:
+def find_tessdata_dir(
+    langs: list[str], *, listed: str | None, prefix: str | None, version: str
+) -> Path:
     """Directory holding every `<lang>.traineddata`; first match wins, in this order:
 
     1. `TESSDATA_PREFIX` (Tesseract reads it too): the directory itself or its `tessdata/`;
     2. the directory `tesseract --list-langs` printed (Tesseract 5 does, 4 does not);
-    3. the standard Debian/Ubuntu package directories.
+    3. the package directories for this Tesseract major version (`SYSTEM_TESSDATA_DIRS`).
 
     Fails loudly instead of fingerprinting the wrong models (AC2b) or none.
     """
@@ -74,7 +77,7 @@ def find_tessdata_dir(langs: list[str], *, listed: str | None, prefix: str | Non
         candidates += [Path(prefix), Path(prefix) / "tessdata"]
     if listed:
         candidates.append(Path(listed))
-    candidates += SYSTEM_TESSDATA_DIRS
+    candidates += SYSTEM_TESSDATA_DIRS.get(version.split(".")[0], ())
     for folder in candidates:
         if all((folder / f"{lang}.traineddata").is_file() for lang in langs):
             return folder
@@ -130,7 +133,7 @@ class TesseractOcrParser:
         if missing:
             raise TesseractNotAvailable(f"tesseract language data not installed: {missing}")
         tessdata = find_tessdata_dir(
-            wanted, listed=listed_dir, prefix=os.environ.get("TESSDATA_PREFIX")
+            wanted, listed=listed_dir, prefix=os.environ.get("TESSDATA_PREFIX"), version=version
         )
         data_sha = await asyncio.to_thread(language_data_sha256, tessdata, wanted)
         self.install = TesseractInstall(version, leptonica, data_sha)
