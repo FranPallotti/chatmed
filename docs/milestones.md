@@ -116,15 +116,33 @@ reconciliation), "What treatment arm is the subject in?", "Was the subject hospi
   `facts_used` across runs (answer wording may differ; the facts may not).
 
 ## M4 — Session lifecycle and guardrails on
-- AC1 `InMemorySessionStore`: TTL sweeper, idempotent `close()` releasing DuckDB and documents.
-- AC2 DuckDB per session is `:memory:` with disk spilling disabled; test proves no file is created.
-- AC3 Guardrail: full pipeline run (fake model) in an empty working dir → no files written
-  anywhere in that dir or the system temp dir.
-- AC4 Guardrail: capture all logs during a full run → no page text, quote or value appears.
-- AC5 Reproducibility test: same PDFs + question, N=5 runs (fake model with recorded outputs and,
-  opt-in, real model) → identical facts and identical cited values.
-- AC6 Restricted SQL tool (optional): SELECT-only, allow-list, tenant filter, limit, timeout,
-  validated with `sqlglot`; negative tests for injection and cross-tenant access.
+M3 already has a minimal `InMemorySessionStore` (create / get / get_documents / close). M4 makes the
+session lifecycle trustworthy and turns on the guardrails that prove the "no storage" rule end to end.
+- AC1 Lifecycle: a background TTL sweeper (asyncio task started/stopped with the app) closes idle
+  sessions; `close()` is idempotent, closes the session's DuckDB connection and drops every
+  reference to documents, facts and chat history. After close, any call with that session id gets
+  404 `session_closed` (never another session's data). A test uses `weakref` to prove the parsed
+  documents and the DuckDB connection object are released after close.
+- AC2 Concurrency: closing (by DELETE or TTL) while an upload or ask is in flight ends that request
+  cleanly with `session_closed`, without writing anything after the wipe. A per-session lock or
+  generation counter makes this deterministic; tests cover both orders.
+- AC3 Capacity: `MAX_SESSIONS` (operational setting) caps concurrent sessions; above it
+  `POST /sessions` returns 503 `capacity`. Combined with the existing per-session limits this bounds
+  memory. Document the worst-case estimate in `architecture.md`.
+- AC4 DuckDB stays in memory: spilling disabled and `memory_limit` set per connection; a query that
+  would exceed it fails with `session_memory_limit` instead of writing to disk. Test proves no file
+  is created (including DuckDB's default temp directory).
+- AC5 Guardrails on: add `chatmed.pipeline.run_full_session(...)` (create → upload → ask → close,
+  fake model from recorded synthetic outputs) and enable `tests/guardrails/test_no_persistence.py`
+  with the CIOMS fixture: no files written in the working dir or the system temp dir; no document
+  text, quote or value in any log output.
+- AC6 Cross-session reproducibility, the challenge requirement verbatim: two *separate* sessions
+  (create → upload the same CIOMS → ask the same question → close, then again) give identical
+  `facts_used` and the same answer fingerprint; verified outcome in both. Fake model: N=5 pairs.
+  Opt-in Azure test: 3 pairs on the synthetic CIOMS.
+- AC7 Lifecycle in the logs: session created / closed (reason: `client` | `ttl` | `shutdown`) /
+  rejected (capacity) as metadata events, so a reviewer can see from the logs that every session
+  was wiped. On app shutdown every open session is closed.
 
 ## M5 — Deployment and demo
 - AC1 Dockerfile (non-root, slim), runs Uvicorn; image builds locally.
@@ -135,6 +153,8 @@ reconciliation), "What treatment arm is the subject in?", "Was the subject hospi
 - AC5 `docs/demo.md`: demo script, including showing that a second session gives the same answer.
 
 ## Stretch (only if time)
+- Restricted SQL tool (was M4 AC6): SELECT-only, allow-list, tenant filter, limit, timeout,
+  validated with `sqlglot`; negative tests for injection and cross-tenant access.
 - Read checkbox states (D13): Document Intelligence selection marks, or a local detector that finds
   the boxes on the rendered page and measures their fill.
 - Encrypted blob session store with crypto-shredding (must pass the session store contract tests).
