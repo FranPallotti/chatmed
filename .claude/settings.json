@@ -12,6 +12,8 @@
     "deny": [
       "Read(./.env)",
       "Read(./.env.local)",
+      "Edit(./samples/**)",
+      "Read(./samples/**)",
       "Bash(az login:*)"
     ]
   }

@@ -39,6 +39,10 @@ Same PDFs + same question in two different sessions must give the same facts and
    `store=True`. Conversation state lives in the session object in memory.
 7. **No secrets in code.** Auth with `DefaultAzureCredential` (Entra ID). Config from env vars.
 8. **No real patient data** in the repo, tests or fixtures. Synthetic documents only.
+9. **Never touch `samples/`.** It holds real study data from the data provider (CIOMS PDFs, SAS
+   datasets) that is not cleared for external sharing (D12). Do not read, open, list, parse or
+   reference it, in code, tests or commands, even if asked; say so and stop. Use `fixtures/` only.
+   `tests/guardrails/test_no_real_samples.py` enforces part of this.
 
 ## Stack
 

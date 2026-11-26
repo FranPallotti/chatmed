@@ -28,6 +28,36 @@ Each acceptance criterion (AC) needs at least one test.
 - AC5 `DocIntelParser` implemented behind config, sends bytes directly, deletes the analyze
   result after reading it; unit-tested with a mocked client (no network in tests).
 
+## M1b — Clinical domain fixtures (D12)
+The tenant databases now hold synthetic CDISC-style ADSL/ADAE data and CIOMS I field metadata
+(`db/seed/`). Fixtures must describe the same synthetic case so M2–M4 can join documents to rows.
+- AC1 `scripts/make_fixtures.py` also generates synthetic CIOMS I-style forms (invented data, layout
+  following the public CIOMS I sections) for acme subject `01001-004`:
+  - `cioms_initial.pdf` (digital): country Argentina, age 47, sex F, reaction onset 2026-06-12,
+    reaction "acute liver injury, ALT 8x ULN", hospitalisation checked (others unchecked),
+    suspect drug "Zentrobal" 20 mg daily, oral, indication "rheumatoid arthritis", therapy start
+    2026-03-10, dechallenge yes, rechallenge na, concomitant drugs "Metformin 850 mg" and
+    "Atorvastatin 20 mg", manufacturer control no. "ACM-2026-0042", date received 2026-06-15,
+    report type initial. The subject id appears as "Subject 01001-004".
+  - `cioms_initial_scanned.pdf`: the same form as an image-only PDF (no text layer).
+  - `cioms_followup.pdf`: two pages, report type followup; page 2 states a corrected onset date
+    2026-06-11, so extraction must report a `conflict` for `reaction_onset_date`.
+- AC2 `fixtures/README.md` lists every value above and points to `db/seed/tenant_acme.sql`;
+  a test checks that the subject id, onset date and drug in the fixtures exist in the acme seed.
+- AC3 Parser contract tests run on the CIOMS fixtures; OCR of the scanned form recovers the
+  subject id, onset date and suspect drug (substring asserts; skipped if Tesseract is missing).
+- AC4 `tests/guardrails/test_no_persistence.py` uses the CIOMS fixture (doc type `cioms`, markers:
+  subject id, drug name, control number) instead of the lab report.
+- AC5 Linux portability (the M5 Docker image is Linux). Found when running the suite on Linux
+  with Tesseract 4.1.1:
+  - tessdata discovery fails ("cannot find the tesseract language data directory"): honor
+    `TESSDATA_PREFIX`, then ask the binary (`tesseract --list-langs` prints the path), then the
+    standard Debian/Ubuntu paths; works with Tesseract 4 and 5.
+  - `test_fixture_generation_is_reproducible_and_committed` compares PDF bytes, which differ across
+    platforms for the rendered scanned fixture. Make the check platform-independent (e.g. compare the
+    digital fixtures byte-for-byte and the scanned ones by extracted text / page image hash at fixed
+    settings), and document why.
+
 ## M2 — Extraction (seed code provided in `src/chatmed/extraction.py`)
 - AC1 Seed tests pass; code adapted to the package and config (deployment, seed, limits).
 - AC2 Field metadata loaded from the tenant DB per document type (repository function + test
