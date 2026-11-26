@@ -566,3 +566,38 @@ def test_label_fragment_on_a_shared_line_is_still_undeterminable() -> None:
     text = "Concomitant: Metformin 850 mg prolonged inpatient hospitalisation"
     (fact,) = _fact_for("hospitalisation", text, "prolonged inpatient hospitalisation", True)
     assert fact.status == Status.UNDETERMINABLE
+
+
+# ---------------------------------------------------------------- merge order (D6)
+
+TWO_LINES = "14. Suspect drug: Zentrobal\n2026-06-12 onset\nNarrative: Zentrobal was stopped\n"
+
+
+def _item(value: Any, quote: str) -> dict[str, Any]:
+    return {"value": value, "evidence": {"page": 1, "quote": quote}}
+
+
+def test_same_value_on_two_lines_keeps_the_same_evidence_in_any_item_order() -> None:
+    doc = ParsedDocument("sha", (ParsedPage(1, TWO_LINES),), "p")
+    box, narrative = (
+        _item("Zentrobal", "Suspect drug: Zentrobal"),
+        _item("Zentrobal", "Zentrobal was"),
+    )
+    a = verify_and_merge(ACME, doc, [{"suspect_drug": [box, narrative]}])
+    b = verify_and_merge(ACME, doc, [{"suspect_drug": [narrative, box]}])
+    assert a == b
+    (fact,) = [f for f in a if f.field_key == "suspect_drug"]
+    assert fact.quote == "14. Suspect drug: Zentrobal"  # page, value, then quote order
+
+
+def test_repeated_value_does_not_add_a_conflict_fact() -> None:
+    page = "Onset: 2026-06-12\nCorrected onset: 2026-06-11\nonset 2026-06-12 again\n"
+    doc = ParsedDocument("sha", (ParsedPage(1, page),), "p")
+    first = _item("2026-06-12", "Onset: 2026-06-12")
+    others = [_item("2026-06-11", "Corrected onset: 2026-06-11"), _item("2026-06-12", "again")]
+    out = {"reaction_onset_date": {**first, "other_statements": others}}
+    facts = [f for f in verify_and_merge(ACME, doc, [out]) if f.field_key == "reaction_onset_date"]
+    assert [(f.status, f.value_text, f.quote) for f in facts] == [
+        (Status.CONFLICT, "2026-06-11", "Corrected onset: 2026-06-11"),
+        (Status.CONFLICT, "2026-06-12", "Onset: 2026-06-12"),
+    ]

@@ -467,25 +467,35 @@ def _resolve_checkbox(
 # ---------------------------------------------------------------- merge
 
 
+def _order(c: Fact) -> tuple[int, str, str]:
+    """Total order on candidates: page, value, then quote. Without the quote, two items with the
+    same page and value would keep the model's item order, and the stored evidence with it."""
+    return (c.page or 0, c.value_text or "", c.quote or "")
+
+
+def _first_per_value(facts: list[Fact]) -> list[Fact]:
+    """One fact per distinct value: the first in `_order` (earliest page, then quote)."""
+    seen: set[str] = set()
+    out = []
+    for c in sorted(facts, key=_order):
+        if (c.value_text or "") not in seen:
+            seen.add(c.value_text or "")
+            out.append(c)
+    return out
+
+
 def _merge_ok(f: FieldDef, ok: list[Fact], doc: ParsedDocument, doc_type: str) -> list[Fact]:
-    """Single value: one fact or a `conflict` per distinct value; multiple: dedupe in order."""
-    ok = sorted(ok, key=lambda c: (c.page or 0, c.value_text or ""))
-    if f.multiple:
-        seen: set[str] = set()
-        out = []
-        for c in ok:
-            if (c.value_text or "") not in seen:
-                seen.add(c.value_text or "")
-                out.append(c)
-        return out
-    if len({c.value_text or "" for c in ok}) == 1:
-        return [ok[0]]  # earliest page as evidence
-    return [replace(c, status=Status.CONFLICT) for c in ok]  # surface it, never pick one
+    """One fact per distinct value. Multiple: all of them; single: the value, or every distinct
+    value marked `conflict` (never picked). Repeats of a value never change the count."""
+    distinct = _first_per_value(ok)
+    if f.multiple or len(distinct) == 1:
+        return distinct
+    return [replace(c, status=Status.CONFLICT) for c in distinct]  # surface it, never pick one
 
 
 def _merge(f: FieldDef, candidates: list[Fact], doc: ParsedDocument, doc_type: str) -> list[Fact]:
     """Fixed rules, so the same candidates always give the same facts."""
-    candidates = sorted(candidates, key=lambda c: (c.page or 0, c.value_text or ""))
+    candidates = sorted(candidates, key=_order)
     if f.checkbox:
         return _resolve_checkbox(f, candidates, doc, doc_type)
     ok = [c for c in candidates if c.status == Status.OK]

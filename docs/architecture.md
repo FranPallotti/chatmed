@@ -61,8 +61,9 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 - Subject join (code, D13/D13a), only for `join_target = adsl.subjid`: normalized exact or
   suffix match → `joined` / `unmatched` / `ambiguous`; only an `ok` subject id is joined
   (`conflict` → `ambiguous`, otherwise `not_attempted`). Stored as `join_status`/`join_value`.
-- Large documents: deterministic page windows; merge rules: single-value → one verified value
-  or `conflict`; multiple → union, dedupe, ordered by page then value.
+- Large documents: deterministic page windows; merge rules: candidates in a total order (page,
+  value, quote), one fact per distinct value (the first in that order); single-value → that
+  value, or each distinct value as `conflict`; multiple → all distinct values.
 - Model calls: our own retries (SDK `max_retries=0`) on 429/5xx/timeouts/connection errors,
   exponential backoff with full jitter, per-call timeout (`LLM_*` settings). Unusable output
   (truncated, refused, not JSON) fails with `ExtractionError`, which never carries content.
