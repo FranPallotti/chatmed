@@ -40,9 +40,12 @@ class Settings(BaseSettings):
     model_seed: int = 7
 
     # Parsing (fixed per deployment; part of the reproducibility fingerprint via parser_id)
-    parser: Literal["routing", "pymupdf"] = "routing"
-    ocr_backend: Literal["local", "docintel"] = "local"
+    parser: Literal["routing", "pdfium"] = "routing"
+    ocr_backend: Literal["local", "docintel"] = "local"  # local = Tesseract (D10)
     docintel_endpoint: str | None = None
+    ocr_dpi: int = Field(default=300, ge=72, le=600)
+    ocr_lang: str = Field(default="eng", pattern=r"^[a-z_]{3,}(\+[a-z_]{3,})*$")
+    tesseract_cmd: str | None = None  # None/empty: find `tesseract` on PATH
 
     # Session (only the in-memory store exists; encrypted_blob is a stretch goal)
     session_store: Literal["memory"] = "memory"

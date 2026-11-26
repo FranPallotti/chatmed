@@ -11,3 +11,9 @@ dist/
 # never commit real documents
 *.real.pdf
 uploads/
+
+# Challenge sample data: real study data, never commit (see docs/open-questions.md)
+samples/
+*.sas7bdat
+*.xpt
+*.cioms.pdf

@@ -102,3 +102,31 @@ def test_keyword_dsn_without_password_is_accepted(env: pytest.MonkeyPatch) -> No
     template = "host=localhost user=chatmed_reader passfile=/x dbname=tenant_{tenant}"
     env.setenv("TENANT_DB_DSN_TEMPLATE", template)
     assert load().tenant_db_dsn_template == template
+
+
+def test_parsing_settings_defaults_and_overrides(env: pytest.MonkeyPatch) -> None:
+    s = load()
+    assert (s.parser, s.ocr_dpi, s.ocr_lang, s.tesseract_cmd) == ("routing", 300, "eng", None)
+    env.setenv("PARSER", "pdfium")
+    env.setenv("OCR_DPI", "200")
+    env.setenv("OCR_LANG", "eng+spa")
+    env.setenv("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+    s = load()
+    assert (s.parser, s.ocr_dpi, s.ocr_lang) == ("pdfium", 200, "eng+spa")
+    assert s.tesseract_cmd and s.tesseract_cmd.endswith("tesseract.exe")
+
+
+@pytest.mark.parametrize(
+    ("key", "bad"),
+    [
+        ("PARSER", "pymupdf"),  # removed in D10
+        ("OCR_DPI", "50"),
+        ("OCR_DPI", "1200"),
+        ("OCR_LANG", "eng; rm -rf"),  # passed to the tesseract command line
+        ("OCR_LANG", "ENG"),
+    ],
+)
+def test_invalid_parsing_settings_fail(env: pytest.MonkeyPatch, key: str, bad: str) -> None:
+    env.setenv(key, bad)
+    with pytest.raises(ValidationError):
+        load()

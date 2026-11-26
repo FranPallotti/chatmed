@@ -44,7 +44,8 @@ Same PDFs + same question in two different sessions must give the same facts and
 
 - Python 3.12, `uv` for dependencies, FastAPI + Uvicorn (async), Pydantic v2.
 - Azure OpenAI (deployed in a Microsoft Foundry project) via `openai.AsyncAzureOpenAI`.
-- DuckDB (in-memory, per session). PyMuPDF for digital PDFs. Local OCR for scans.
+- DuckDB (in-memory, per session). `pypdfium2` for digital PDFs and page rendering; Tesseract 5
+  for scans, called over stdin/stdout without `pytesseract` (D10, D11). No PyMuPDF (AGPL).
   Azure Document Intelligence as an optional parser backend (bytes in, delete result right after).
 - Tenant DB: PostgreSQL, **one database per tenant** (`tenant_acme`, `tenant_globex`), read-only role
   `chatmed_reader_{tenant}` per tenant, async `psycopg`. Local: `docker compose up -d`. Schema in `db/schema/`.
@@ -68,7 +69,7 @@ src/chatmed/
   models.py         # shared dataclasses (ParsedDocument, ParsedPage, ...)
   config.py         # settings from env (pydantic-settings)
   logconfig.py      # metadata-only logging: event names + allow-listed fields (rule 2)
-  parsing/          # DocumentParser interface + pymupdf / local_ocr / docintel / routing
+  parsing/          # DocumentParser interface + pdfium / tesseract_ocr / docintel / routing
   extraction.py     # metadata -> JSON schema -> LLM -> verified facts -> DuckDB  (seeded, see M2)
   session/          # SessionStore interface + in-memory implementation (+ encrypted later)
   tenant_db/        # read-only repository + parameterized tools

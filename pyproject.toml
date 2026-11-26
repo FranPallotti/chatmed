@@ -12,7 +12,8 @@ dependencies = [
     "openai>=1.40",
     "azure-identity>=1.17",
     "duckdb>=1.1",
-    "pymupdf>=1.24",
+    "pypdfium2>=4.30",  # D10: text layer + page rendering (Apache-2.0/BSD-3)
+    "azure-ai-documentintelligence>=1.0.0",  # optional OCR backend (D1, M1 AC5)
     "psycopg[binary]>=3.2",
     "aiohttp>=3.9",  # required by azure.identity.aio (async Entra ID auth)
 ]
@@ -23,6 +24,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.6",
     "mypy>=1.11",
+    "fpdf2>=2.8",  # writes the synthetic fixture PDFs (scripts/make_fixtures.py)
 ]
 
 [build-system]

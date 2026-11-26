@@ -77,3 +77,36 @@ Format: context → options → decision → why → consequences. Add new entri
   Production with real patient data: DataZoneStandard or regional Standard deployment.
 - **Consequence:** before 2027-04-14 the model must be replaced and re-validated with the
   reproducibility tests.
+
+## D10. PDF text extraction and OCR
+- Options: PyMuPDF · pypdfium2 · pdfplumber (text); Tesseract · RapidOCR · Document Intelligence (OCR).
+- **Decision:** `pypdfium2` for the text layer and for rendering pages to images; Tesseract 5 via
+  `pytesseract` for pages without a text layer; Document Intelligence stays an optional backend (D1).
+- **Why (measured on a synthetic lab report, 2 vCPU / 8 GB):**
+  - pypdfium2 extracted every line correctly and also renders pages, so one library covers both needs.
+    License BSD-3/Apache-2.0. PyMuPDF is AGPL (strong obligations for a company product) and its
+    current version pulls in onnxruntime.
+  - Tesseract at 300 DPI: every line correct, ~2.2 s/page, 3 runs byte-identical, ~290 MB peak.
+    License Apache-2.0.
+  - RapidOCR: ~29 s/page and the process was killed for memory on the second page. Rejected.
+- **Consequences:** Tesseract is a system binary: install it locally (Windows:
+  `winget install -e --id UB-Mannheim.TesseractOCR`) and in the Docker image (`apt-get install
+  tesseract-ocr`, M5). Its version, DPI and language go into `parser_id`. Tables come out as plain
+  lines; if real samples need table structure, use the Document Intelligence backend.
+
+## D11. Calling Tesseract without temp files (amends D10)
+- Context: D10 named `pytesseract`, but `pytesseract.save()` writes each page image to a
+  `NamedTemporaryFile` and Tesseract then writes its text to a temp output file: page images and
+  extracted text on disk (hard rule 1).
+- Options: `pytesseract` · `tesserocr` (C bindings, hard to install on Windows) · run the
+  `tesseract` binary ourselves over stdin/stdout.
+- **Decision:** run `tesseract stdin stdout -l <lang> --dpi <dpi> --psm 3` as a subprocess; the page
+  is rendered by pypdfium2 to an 8-bit grayscale PGM in memory and written to stdin; text is read
+  from stdout. No `pytesseract`, no Pillow at runtime. Approved by the project owner (M1 plan).
+- **Why:** nothing touches disk, one dependency fewer, and the exact command line is explicit
+  and goes into `parser_id`. Measured on the scanned fixture: every line correct, two runs
+  byte-identical.
+- **Consequences:** Tesseract's stderr is discarded and errors carry only the exit code (stderr
+  could echo content). `TESSERACT_CMD` points to the binary when it is not on PATH. Per-page
+  timeout of 120 s.
+

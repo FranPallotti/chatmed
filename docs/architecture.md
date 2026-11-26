@@ -23,12 +23,22 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 
 ### Parsing (`src/chatmed/parsing/`)
 - `DocumentParser` interface → `ParsedDocument(sha256, pages, parser_id)`.
-- `PyMuPdfParser`: digital PDFs, local, deterministic.
-- `LocalOcrParser`: pages without a text layer (scans), local, deterministic.
+- `PdfiumParser`: digital PDFs via `pypdfium2`, local, deterministic.
+- `TesseractOcrParser`: pages without a text layer: render with pypdfium2 at a fixed DPI, OCR with
+  Tesseract (fixed language and config), local, deterministic.
 - `DocIntelParser` (optional): sends bytes directly (no blob upload), fetches the result,
   calls delete-analyze-result immediately.
-- `RoutingParser`: per page, text layer → PyMuPDF, otherwise → configured OCR backend.
+- `RoutingParser`: per page, text layer → pdfium, otherwise → configured OCR backend.
+  A page has a text layer if pdfium returns any non-whitespace text. Only image-only pages go to
+  OCR, copied into an in-memory sub-PDF; `parser_id` names the OCR backend only when it was used.
+- Tesseract runs over stdin/stdout (D11); pdfium calls hold a process-wide lock (not thread-safe).
+- `build_parser(settings)` picks the implementation at startup and checks Tesseract there.
 - `parser_id` records backend + version; it is part of the reproducibility fingerprint.
+  For Tesseract it also records the Leptonica version and a hash of the `.traineddata` files used
+  (same Tesseract version can ship different models), e.g.
+  `tesseract-5.4.0-lept1.84.1-dpi300-eng-psm3-data<sha12>`.
+- Document Intelligence: if deleting the analyze result fails, `docintel_delete_failed` is logged
+  (doc sha256 only), the original error is kept, and a successful parse is turned into an error.
   The backend is fixed per deployment/tenant config, never per request.
 
 ### Extraction (`src/chatmed/extraction.py`, seeded)
