@@ -130,3 +130,15 @@ def test_invalid_parsing_settings_fail(env: pytest.MonkeyPatch, key: str, bad: s
     env.setenv(key, bad)
     with pytest.raises(ValidationError):
         load()
+
+
+def test_every_setting_is_fingerprint_or_operational_exactly_once() -> None:
+    """D14: a new setting fails here until someone decides whether it can change facts."""
+    from chatmed.config import FINGERPRINT_SETTINGS, OPERATIONAL_SETTINGS
+
+    fields = set(Settings.model_fields)
+    assert not FINGERPRINT_SETTINGS & OPERATIONAL_SETTINGS
+    assert FINGERPRINT_SETTINGS | OPERATIONAL_SETTINGS == fields, (
+        f"unclassified: {sorted(fields - FINGERPRINT_SETTINGS - OPERATIONAL_SETTINGS)}, "
+        f"unknown: {sorted((FINGERPRINT_SETTINGS | OPERATIONAL_SETTINGS) - fields)}"
+    )

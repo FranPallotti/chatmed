@@ -56,6 +56,48 @@ Format: context → options → decision → why → consequences. Add new entri
   listing functions by hand). `ast.dump()` differs between Python minor versions, so the test
   requires the pinned 3.12. The fingerprint also contains `schema_hash`, which covers every field
   attribute, `checkbox` and `box_labels` included (tested).
+- **Amendment (M3 review): every output-deciding module is under exactly one guard.** A module
+  "decides output" if, with the same inputs (PDF bytes, tenant data, question, model output),
+  changing its code can change page text, facts, `facts_used`, statuses or which answer is
+  returned. Each such module is hashed by exactly one guard; `test_guard_coverage.py` walks the
+  `chatmed` package and fails on a module that is unclassified or listed twice.
+  - **Rules version** (`RULES_VERSION`, since `rules-3`; `test_rules_version.py`), in order:
+    `chatmed.extraction` (extraction prompt and schema, grounding, checkbox rules, merge,
+    subject join), `chatmed.agent.reconcile` (adae record selection, item comparison),
+    `chatmed.agent.answer` (answer checker, `facts_used` closure, fallback text),
+    `chatmed.agent.tools` (tool rows and ids, printed-subject-id mapping, joined `subject_id`
+    fact in the reconciliation unit), `chatmed.agent.retrieval` (whole text vs BM25, page
+    order), `chatmed.agent.loop` (one retry, iteration and time limits, answer fingerprint),
+    `chatmed.tenant_db.repository` (which tenant rows and columns the tools see),
+    `chatmed.parsing.base`, `.pdfium`, `.tesseract_ocr`, `.docintel`, `.routing` (page text).
+  - **Agent prompt version** (`AGENT_PROMPT_VERSION`, `agent-v3`;
+    `test_agent_prompt_version.py`): `chatmed.agent.prompt`, which holds everything the agent
+    model is shown (system prompt, session context, retry note, tool and answer schemas).
+    The extraction prompt stays in `chatmed.extraction`, so it is under the rules guard (and
+    `PROMPT_VERSION` in the extraction fingerprint).
+  - **Not output-deciding** (listed with reasons in `test_guard_coverage.py`): package
+    `__init__` re-exports, `chatmed.models` (dataclasses), `chatmed.config` (settings loading),
+    `chatmed.logconfig` (logging), `chatmed.api` (transport), `chatmed.parsing` (picks the
+    parser from config; the choice is in `parser_id`), `chatmed.session.base` / `.memory`
+    (storage; every consumer sorts documents by sha256 itself).
+  - **Settings (decided after the M3 review):** code is covered by the module guards; setting
+    *values* are split in `chatmed.config` into `FINGERPRINT_SETTINGS` and
+    `OPERATIONAL_SETTINGS`, and `tests/test_config.py` fails unless every `Settings` field is
+    in exactly one. Fingerprint settings can change facts for the same inputs and go into
+    both fingerprints by value (`name=value`, sorted by name; `config.fingerprint_settings`),
+    the extraction fingerprint of each document and the answer fingerprint (rules-5): model
+    endpoint, deployment, API version, seed,
+    `EXTRACTION_MAX_CHARS` (extraction windows), `AGENT_FULLTEXT_MAX_CHARS`,
+    `AGENT_BM25_TOP_K`, the parser settings (`PARSER`, `OCR_BACKEND`, `OCR_DPI`, `OCR_LANG`,
+    also in `parser_id`) and `TENANT_DB_DSN_TEMPLATE` (which databases the data comes from).
+    Operational settings only decide whether a verified answer is produced, or how the service
+    runs, and stay out: LLM timeout/attempts/backoff, `AGENT_MAX_ITERATIONS`,
+    `AGENT_QUESTION_TIMEOUT_SECONDS`, both `*_MAX_COMPLETION_TOKENS` (a truncated reply is an
+    error, never partial facts), `DUCKDB_MEMORY_LIMIT` (no spill to disk: over the limit a
+    query fails, it cannot return other rows), admission limits, `TENANTS`,
+    `DOCINTEL_ENDPOINT` and `TESSERACT_CMD` (the model id and binary version are in
+    `parser_id`), session settings, `LOG_LEVEL`. A run an operational setting cuts short ends
+    with outcome `fallback` (or an error event), which claims no reproducibility (D14).
 
 ## D7. Deployment
 - **Decision:** one Azure Container App, Azure OpenAI in Foundry, PostgreSQL with synthetic tenants,
@@ -229,3 +271,119 @@ Approved by the project owner after repeated real-model runs.
   quote, even though the line has extra words.
 - **Trade-off:** a citation can be longer than needed (a whole form line, or OCR text from
   another column on the same line).
+
+## D14. Agent loop, reconciliation, session tenant and answer streaming (M3)
+Approved by the project owner with the M3 plan.
+- **Session tenant:** `POST /sessions {"tenant_id": "acme"}`; the value must match
+  `^[a-z0-9_]+$` and be in `TENANTS` (D13a), else 422. It is fixed for the session's life, the
+  tenant repository is bound to it, and no agent tool has a tenant argument (rule 5).
+  **M5:** with Entra ID auth the tenant comes from the caller's token (an app role or group
+  claim mapped to one tenant), and the request field is removed or must equal it.
+- **Matching `adae` record for `reconcile_case`** (tiered, deterministic, in code):
+  1. exactly one of the subject's `adae` rows has `astdt` equal to one of the document's onset
+     values (`ok`, or the values of a `conflict`) → that record; onset item `match`;
+  2. otherwise, the unique serious (`aeser = 'Y'`) row whose `astdt` is nearest to an onset
+     value, within `AE_MATCH_WINDOW_DAYS = 7` → that record; onset item `mismatch` with the day
+     difference;
+  3. otherwise (no onset value, no row in the window, or a tie) → every item `not_comparable`,
+     reason `no_unique_ae_record`.
+  An onset `conflict` is never compared: the onset item is `not_comparable` (reason `conflict`)
+  even when its values selected the record. The window is a rule: `chatmed.agent.reconcile` is
+  one of the modules hashed for `RULES_VERSION` (D6), which became `rules-2`.
+- **Action taken / outcome:** the CIOMS field metadata has no such fields. These items are
+  `not_comparable`, reason `no_document_field`, unless the tenant defines fields with keys
+  `action_taken` / `outcome`. No seed fields are added.
+- **Seriousness:** the tenant's `serious` field if it has one, else the four CIOMS boxes
+  (`patient_died`, `hospitalisation`, `disability`, `life_threatening`): any `ok` true → `Y`;
+  all `ok` false → `N`; otherwise `not_comparable` (reason: the statuses, e.g. `undeterminable`).
+- **Answers:** the model ends the loop with a strict JSON answer `{text, cited_ids, quotes}`.
+  Code builds `facts_used` from the ids of tool results it holds (values never come from the
+  model), grounds quotes against page text, and rejects text whose numbers/dates are not in
+  `facts_used`. One retry, then a deterministic fallback text built from `facts_used`.
+  Output that is not exactly one JSON object (the real model once sent two back to back) is a
+  rejected answer and gets the same one retry. Every model call, rejected answers included,
+  counts toward `AGENT_MAX_ITERATIONS`. A rejected output is never logged: only its length
+  (`output_chars`) and the reason code.
+- **Checker details (M3 review):**
+  - Dates are compared as dates in any written form (ISO, `12 June 2026`, `12-JUN-2026`,
+    `June 12, 2026`, `12/06/2026` read both day- and month-first; month-name dates without a
+    year match on month and day). A written date that is not a real date is rejected. Before,
+    "June 6, 2026" passed against 2026-06-12 because 6 and 2026 occurred in it.
+  - On the source side (`facts_used` values and quotes) a date supports only its one reading
+    (rules-6). An ambiguous source such as `12/06/2026` (12 June or 6 December) supports no
+    resolved date: the text may repeat it as written (`12/06/2026`, `12.06.2026`) but not
+    state 2026-06-12 or 2026-12-06. The text's own numeric dates may still be read either way
+    against unambiguous sources.
+  - Identifiers are not number sources: the `doc` sha prefix and the citation `key`/`table`
+    are skipped, so digits of a sha (`7652ea457661`) cannot support "7652".
+  - A status counts as stated only as a whole word (plural/`-ing` allowed; a hyphen on either
+    side makes it another word, so "conflict-free" and "non-conflicting" do not count) with
+    no negation anywhere before it in the same clause (rules-6; before, only the 3 words
+    before it were checked, so "no evidence of any conflict" passed). Negations: `no`, `not`,
+    `never`, `without`, `none`, `nothing`, `absence`, `lack`, `free`, ..., and any word ending
+    in `n't`. Clauses end at punctuation, dashes and `but`/`and`/`or`/`so`/`because`/`since`/
+    `while`/`whereas`/`although`/`though`/`however`. The `not` of `not comparable` /
+    `not attempted` is part of the status, not a negation. This errs towards rejecting (a
+    retry) rather than towards hiding a status; it is a check on top of the prompt, which
+    asks for the status names verbatim.
+- **Question time limit:** `AGENT_QUESTION_TIMEOUT_SECONDS` (default 25 s, under the 30 s
+  verified-answer target) covers the whole question: session context, every model call,
+  retries with their backoff, and tools. When it runs out, the in-flight call is cancelled and
+  the deterministic fallback is returned with reason `deadline` (logged as `agent.deadline`,
+  metadata only). The per-call `LLM_TIMEOUT_SECONDS` still applies inside it.
+- **Reconciliation is one unit in `facts_used` (approved after AC9 runs, option A):** citing
+  any `recon:<doc>:` row adds all reconciliation items of that document, the `adae` record
+  they were compared with, and the document's **joined** `subject_id` fact. `reconcile_case`
+  returns and registers that fact itself (same id as `query_document_facts` gives it), so it
+  is added by code whether or not the model queried or cited it; an unjoined subject fact is
+  not added. The real model cited varying subsets across runs, which changed `facts_used` and
+  let `not_comparable` items drop out of the text; with the whole unit cited, the status check
+  makes the answer state every `not_comparable`.
+- **Session context (approved after AC9 runs):** a second system message lists the session's
+  documents (sha prefix, type, page count; sorted by sha256) and the tenant's field keys per
+  document type (sorted). Metadata only. It is part of the agent prompt: since `agent-v3`
+  everything the model is shown lives in `chatmed.agent.prompt`, and
+  `tests/guardrails/test_agent_prompt_version.py` hashes that whole module and fails unless
+  the hash is recorded for the current `AGENT_PROMPT_VERSION` (D6, M3 review amendment). A
+  recorded hash is never re-recorded: any change bumps the version.
+- **Status names are checked verbatim (`agent-v2`):** the status check requires each status of
+  a cited row by its name (underscore or space). With `agent-v1` the real model wrote
+  "cannot be compared" for `not_comparable`, so every reconciliation answer was rejected once
+  (`status_not_stated`) and only verified on the retry. The check is not loosened to accept
+  paraphrases (that would weaken AC4); `agent-v2` tells the model the names are checked
+  verbatim, with that example. Reconciliation questions are answered from `reconcile_case`
+  only. AC9 also requires first-attempt verification.
+- **Answer fingerprint and outcome (revised after the M3 reviews):** the fingerprint is the
+  sha256 of `AGENT_PROMPT_VERSION`, `RULES_VERSION`, every `FINGERPRINT_SETTINGS` value
+  (`name=value`, sorted by name), the session's tenant id, the sorted extraction
+  fingerprints of the session's documents (D6), and since rules-6:
+  - a sha256 of the session history sent with the question (earlier questions and answer
+    texts), because earlier turns steer which tools the model calls. So the claim holds per
+    conversation: the same question after the same earlier turns;
+  - a sha256 per tenant DB read the tools made (`field_schema`, `subject`, `adverse_events`,
+    keyed by call and arguments; for `reconcile_case`, all events of the subject it chose
+    from, not only the selected record), because tenant study data can change between
+    sessions while its schema hash stays the same. A tenant change the question does not
+    read leaves the fingerprint unchanged.
+  Only digests enter the fingerprint, never history text or tenant values. The extraction fingerprint holds the same settings values, next to the
+  document sha256, `parser_id`, the tenant schema hash, `PROMPT_VERSION` and
+  `RULES_VERSION`. Operational settings are not in it. The `answer` event carries
+  `outcome: verified | fallback`; a fallback carries a fixed `reason` code (`max_iterations`,
+  `deadline`, `value_not_in_facts_used`, ...) and no fingerprint. Only verified answers
+  claim reproducibility: same fingerprint and question → same `facts_used`. That is what AC9
+  measures, and the reproducibility tests compare verified answers only.
+- **Printed subject id (approved after AC9 runs):** `get_subject` / `list_adverse_events`
+  accept the `join_value` of a joined `subject_id` fact or that fact's id exactly as printed
+  (`101-01001-004`), which maps to the same fact's `join_value` only. Nothing else matches;
+  an unjoined or unknown id is refused before the tenant DB is called.
+- **Streaming (`POST /sessions/{id}/ask`):** NDJSON. Progress events carry metadata only
+  (`{"event": "tool", "name": ..., "iteration": ...}`); one final `answer` event carries
+  `outcome`, `reason`, the text, `facts_used` and (verified only) `fingerprint`. Tokens are not streamed because text must pass the code check
+  before anyone sees it. Targets (requirements): first event < 2 s, verified answer < 30 s.
+- **Interface change:** `SessionStore.get(session_id)` was added: the API needs a session's
+  tenant, history and lock by id. Starlette's `UploadFile` is not used (it spools uploads over
+  1 MB to a temp file); multipart bodies are parsed in memory with the stdlib `email` parser.
+  The upload body is read as a stream with a byte counter: a declared Content-Length over the
+  limit (`MAX_UPLOAD_MB` + 64 KiB multipart overhead) is refused with 413 before any byte is
+  read, and the first chunk past the limit ends the read with 413 (Content-Length may be absent
+  or wrong). The file part itself is then checked against `MAX_UPLOAD_MB`.

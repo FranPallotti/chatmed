@@ -281,10 +281,7 @@ async def test_facts_load_into_in_memory_duckdb(client: FakeModelClient) -> None
     ).fetchone()
     assert row == ("joined", "01001-004")
     assert result.fingerprint == fingerprint(
-        doc,
-        DocTypeSchema.from_rows("acme", "cioms", ACME_CIOMS_ROWS),
-        "pinned-deployment",
-        7,
+        doc, DocTypeSchema.from_rows("acme", "cioms", ACME_CIOMS_ROWS), make_settings()
     )
 
 
@@ -526,9 +523,40 @@ def test_versions_change_the_fingerprint(
 ) -> None:
     doc = ParsedDocument("sha", (), "p")
     schema = DocTypeSchema.from_rows("acme", "cioms", ACME_CIOMS_ROWS)
-    before = fingerprint(doc, schema, "d", 7)
+    before = fingerprint(doc, schema, make_settings())
     monkeypatch.setattr(f"chatmed.extraction.{name}", value)
-    assert fingerprint(doc, schema, "d", 7) != before
+    assert fingerprint(doc, schema, make_settings()) != before
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("extraction_max_chars", 1234),
+        ("azure_openai_deployment", "other-deployment"),
+        ("model_seed", 8),
+        ("azure_openai_api_version", "2099-01-01"),
+        ("ocr_dpi", 200),
+        ("agent_bm25_top_k", 5),  # every fingerprint setting, agent ones included
+    ],
+)
+def test_fingerprint_settings_change_the_extraction_fingerprint(name: str, value: object) -> None:
+    doc = ParsedDocument("sha", (), "p")
+    schema = DocTypeSchema.from_rows("acme", "cioms", ACME_CIOMS_ROWS)
+    before = fingerprint(doc, schema, make_settings())
+    assert fingerprint(doc, schema, make_settings(**{name: value})) != before
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("llm_max_attempts", 2), ("extraction_max_completion_tokens", 100), ("max_upload_mb", 1)],
+)
+def test_operational_settings_do_not_change_the_extraction_fingerprint(
+    name: str, value: object
+) -> None:
+    doc = ParsedDocument("sha", (), "p")
+    schema = DocTypeSchema.from_rows("acme", "cioms", ACME_CIOMS_ROWS)
+    before = fingerprint(doc, schema, make_settings())
+    assert fingerprint(doc, schema, make_settings(**{name: value})) == before
 
 
 # ---------------------------------------------------------------- evidence = full line (D13c)

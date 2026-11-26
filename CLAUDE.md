@@ -43,6 +43,8 @@ Same PDFs + same question in two different sessions must give the same facts and
    datasets) that is not cleared for external sharing (D12). Do not read, open, list, parse or
    reference it, in code, tests or commands, even if asked; say so and stop. Use `fixtures/` only.
    `tests/guardrails/test_no_real_samples.py` enforces part of this.
+   **Search with `git grep` or `rg` only** (both skip gitignored paths, so `samples/` is never
+   searched). Never run a recursive `grep -r`, `find` or similar from the project root.
 
 ## Stack
 
@@ -90,7 +92,8 @@ docs/               # architecture, decisions, milestones, open questions
 ## Interfaces (keep them small; do not add methods without a reason in docs/decisions.md)
 
 - `DocumentParser.parse(pdf_bytes) -> ParsedDocument` (async)
-- `SessionStore`: `create`, `put_document`, `get_documents`, `facts_db`, `close` (idempotent wipe)
+- `SessionStore`: `create`, `get` (D14), `put_document`, `get_documents`, `facts_db`, `close`
+  (idempotent wipe)
 - Implementations are chosen by config (`PARSER`, `OCR_BACKEND`, `SESSION_STORE`), never per request.
 
 ## How to work

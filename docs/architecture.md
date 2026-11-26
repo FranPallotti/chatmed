@@ -73,8 +73,15 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 - Facts go into the session DuckDB table `facts` (long format; joins to DB via `join_target`).
 
 ### Session (`src/chatmed/session/`)
-- `SessionStore` interface. POC: `InMemorySessionStore` (dict, TTL sweeper, explicit wipe).
-- Each session owns: tenant id, documents, a DuckDB `:memory:` connection, chat history.
+- `SessionStore` interface (`create`, `get`, `put_document`, `get_documents`, `facts_db`,
+  `close`; `get` added in M3, D14). POC: `InMemorySessionStore` (dict, explicit idempotent wipe;
+  the TTL sweeper comes in M4).
+- Each session owns: tenant id (fixed at creation, D14), documents (ordered by sha256), a DuckDB
+  `:memory:` connection, chat history (questions and verified answer texts), and a lock that
+  serializes uploads and questions within the session.
+- DuckDB is opened with `temp_directory=''`, `memory_limit`, then
+  `SET enable_external_access=false` (no `COPY TO`, `ATTACH` or file reads, and the two settings
+  above can no longer be changed on that connection).
 - DuckDB settings per connection: in-memory only, no spilling to disk
   (set `temp_directory` to an empty value and verify with the no-persistence guardrail test;
   keep `memory_limit` within container RAM and fail clearly if exceeded).
@@ -88,26 +95,71 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 - `PostgresTenantRepository(settings, tenant_id)` is bound to one tenant at construction; the
   tenant must match `^[a-z0-9_]+$` and be in `TENANTS` before it fills the DSN template (D13a).
   Fixed parameterized queries, connections set read-only. Methods: `field_schema(doc_type)`,
-  `subject_ids()`. psycopg's async driver needs a selector event loop on Windows.
+  `subject_ids()`, `subject(subjid)`, `adverse_events(subjid, serious_only)`.
+  psycopg's async driver needs a selector event loop on Windows.
 - Agent tools are parameterized queries for main paths.
 - Restricted SQL tool (optional): SELECT only, allow-listed tables/views, tenant filter enforced,
   row limit, timeout. Parsed/validated before execution (e.g. `sqlglot`).
 
 ### Agent (`src/chatmed/agent/`)
-- Code-first loop with function calling over stateless chat completions
-  (no Agent Service threads, no `store=True`).
-- Tools: `query_document_facts`, `get_field_metadata`, tenant DB tools, optional `restricted_sql`.
-- Fallback for free-text questions not covered by fields: pass relevant page text
-  (small docs: whole text; large docs: in-memory BM25 over pages, ties broken by page number).
-- Answers: values come from tool results; the model formats them; every claim carries a citation.
-- Max iterations, per-call timeout, retries with exponential backoff + jitter on 429/5xx.
+- `prompt.py`: everything the model is shown (system prompt, session context, retry note,
+  tool and answer schemas), versioned by `AGENT_PROMPT_VERSION` and hashed as one module. All
+  other agent modules are under `RULES_VERSION` (D6).
+- `loop.py`: code-first loop with function calling over stateless chat completions (no Agent
+  Service threads, no `store=True`). Every call: full message list, temperature 0, seed, pinned
+  deployment, `AGENT_PROMPT_VERSION`, strict tools, strict answer schema,
+  `parallel_tool_calls=False`. A second system message lists the session's documents (sha
+  prefix, type, page count) and the tenant's field keys per document type: metadata only.
+  Without it the real model guessed ids and keys ("hospitalization") and got empty results.
+  `AGENT_MAX_ITERATIONS` model calls, then the fallback. Per-call
+  timeout and the M2 retry policy (429/5xx/timeouts). Logs `agent.llm_call`, `agent.tool_call`,
+  `agent.answer` with metadata only.
+- `tools.py`: `query_document_facts`, `get_field_metadata`, `get_subject`,
+  `list_adverse_events`, `reconcile_case`, `search_document_text`. No tool has a tenant argument;
+  the repository is bound to the session's tenant. `get_subject`/`list_adverse_events` accept
+  the `join_value` of a `joined` fact in the session, or that fact's subject id exactly as
+  printed (mapped to its `join_value`; the real model passed the printed id). Anything else is
+  refused (`subject_not_joined`) before touching the DB. Every returned row has a stable id (`fact:<sha12>:<field>:<n>`,
+  `adsl:<subjid>`, `adae:<usubjid>:<aeseq>`, `recon:<sha12>:<item>`, `page:<sha12>:<n>`) and is
+  kept in an in-memory evidence registry for the question. Tool errors reach the model as short
+  codes (`unknown_document`, `subject_not_joined`, `tool_failed`, ...).
+- `reconcile.py` (rule module, D14): tiered `adae` record selection and per-item comparison
+  (onset, seriousness, action taken, outcome) → `match` / `mismatch` / `not_comparable`.
+- `retrieval.py`: page text for questions no field covers: whole text up to
+  `AGENT_FULLTEXT_MAX_CHARS`, else in-memory BM25 over pages (top `AGENT_BM25_TOP_K`, ties broken
+  by sha256 then page).
+- `answer.py`: the model ends with `{text, cited_ids, quotes}`. Code builds `facts_used` from the
+  registry (values never come from the model), grounds quotes against the page text
+  (`ground_quote`, stored as full lines, D13c), rejects text with numbers/dates not in
+  `facts_used` (dates compared as dates in any written form; an ambiguous source date such as
+  12/06/2026 supports no resolved reading; sha prefixes and row keys are not number sources),
+  and rejects text that cites a row with an honesty status (`undeterminable`,
+  `conflict`, `unverified`, `missing`, `invalid`, `unmatched`, `ambiguous`, `not_attempted`,
+  `not_comparable`) without naming it (whole words, "conflict-free" is not one; a mention
+  with a negation earlier in its clause, such as "no evidence of any conflict", does not
+  count). Output that is not exactly one JSON object (the real
+  model once sent two) is also a rejection. One retry, then a deterministic fallback listing
+  the retrieved rows with their statuses. A cited `recon:` row brings in the whole
+  reconciliation of its document, the compared `adae` record and the document's joined
+  `subject_id` fact, which `reconcile_case` registers itself (D14). A verified answer carries
+  a fingerprint (agent prompt version, rules version, `FINGERPRINT_SETTINGS` values, tenant,
+  document fingerprints, and digests of the session history and of each tenant DB read); a fallback carries outcome `fallback` and a reason code instead.
 
 ### API (`src/chatmed/api.py`)
-- `POST /sessions` → session id
-- `POST /sessions/{id}/documents` (multipart PDF + doc_type) → document sha256 + extraction summary
-- `POST /sessions/{id}/ask` → streamed answer with citations
-- `DELETE /sessions/{id}` → wipe
-- Request-body logging disabled. Upload size and page limits enforced.
+- `POST /sessions {"tenant_id"}` → session id (tenant checked against `TENANTS`, D14)
+- `POST /sessions/{id}/documents` (multipart `file` + `doc_type`) → sha256, page count,
+  parser id, fingerprint, counts per status, join status (no values)
+- `POST /sessions/{id}/ask {"question"}` → NDJSON: `started`, metadata-only `tool` events,
+  then one `answer` event (`outcome` verified|fallback, `reason`, `text`, `facts_used`,
+  `fingerprint` for verified answers) or an `error` code (D14)
+- `DELETE /sessions/{id}` → idempotent wipe (204)
+- The multipart body is streamed into memory with a byte counter (limit `MAX_UPLOAD_MB` +
+  64 KiB): an oversized Content-Length is refused before reading, and the first chunk past the
+  limit ends the read. It is parsed with the stdlib `email` parser: Starlette's `UploadFile`
+  spools files above 1 MB to disk.
+- Limits: 413 `upload_too_large`, 422 `too_many_pages`, 409 `too_many_documents` /
+  `duplicate_document`, 415 `pdf_required`. Errors are fixed codes. No body is ever logged.
+- Run with `uv run uvicorn chatmed.api:app` or `uv run python -m chatmed.api`.
 
 ### Logging (`src/chatmed/logconfig.py`)
 - `configure_logging()` installs one JSON handler on the root logger with `MetadataOnlyFilter`.
@@ -115,9 +167,12 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
   Free-text messages (f-strings, third-party prose) are replaced by `unstructured_message`;
   `%s` args are never rendered; `extra` keys outside `ALLOWED_FIELDS` and non-scalar or long
   values are dropped; exceptions keep only their type and code locations.
-- The filter only sees records that reach its handler. Loggers with their own handlers
-  (uvicorn) and extra handlers (OpenTelemetry) must be routed through it or get their own filter
-  (to do in M3/M5).
+- The filter only sees records that reach its handler. `configure_logging()` strips the
+  handlers uvicorn installs on `uvicorn`, `uvicorn.error`, `uvicorn.access`, `uvicorn.asgi` and
+  `fastapi` and lets them propagate to the root handler (M3). It also installs `sys.excepthook`
+  and `threading.excepthook`; the API sets the asyncio loop exception handler at startup and
+  logs unhandled route errors as `api.unhandled_error`. OpenTelemetry handlers (M5) must get
+  their own filter.
 
 ## Reproducibility
 
