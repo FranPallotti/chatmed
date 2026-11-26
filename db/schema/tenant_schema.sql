@@ -27,29 +27,41 @@ CREATE TABLE field_definitions (
     UNIQUE (document_type_id, key)
 );
 
--- Business data the agent can combine with document facts (synthetic).
-CREATE TABLE patients (
-    id         SERIAL PRIMARY KEY,
-    mrn        VARCHAR(32)  NOT NULL UNIQUE,
-    first_name VARCHAR(100) NOT NULL,
-    last_name  VARCHAR(100) NOT NULL,
-    birth_date DATE         NOT NULL,
-    sex        CHAR(1)      NOT NULL CHECK (sex IN ('F','M','X'))
+-- Clinical trial data (synthetic), modeled on a subset of the public CDISC ADaM standard.
+-- ADSL: one row per subject. ADAE: one row per adverse event. Lowercase ADaM variable names.
+CREATE TABLE adsl (
+    studyid  VARCHAR(20)  NOT NULL,
+    usubjid  VARCHAR(40)  PRIMARY KEY,           -- unique subject id across studies
+    subjid   VARCHAR(20)  NOT NULL UNIQUE,       -- subject id within the study (appears on CIOMS)
+    siteid   VARCHAR(10)  NOT NULL,
+    age      INT          NOT NULL,
+    ageu     VARCHAR(10)  NOT NULL DEFAULT 'YEARS',
+    sex      CHAR(1)      NOT NULL CHECK (sex IN ('F','M','U')),
+    country  CHAR(3)      NOT NULL,              -- ISO 3166 alpha-3
+    arm      VARCHAR(60)  NOT NULL,              -- planned arm
+    trt01a   VARCHAR(60)  NOT NULL,              -- actual treatment
+    trtsdt   DATE,                               -- first dose date
+    trtedt   DATE,                               -- last dose date
+    saffl    CHAR(1)      NOT NULL CHECK (saffl IN ('Y','N'))   -- safety population flag
 );
 
-CREATE TABLE lab_orders (
-    id         SERIAL PRIMARY KEY,
-    patient_id INT         NOT NULL REFERENCES patients(id),
-    test_code  VARCHAR(32) NOT NULL,
-    ordered_on DATE        NOT NULL,
-    status     VARCHAR(16) NOT NULL CHECK (status IN ('ordered','collected','resulted','cancelled'))
-);
-
-CREATE TABLE reference_ranges (
-    test_code VARCHAR(32)   PRIMARY KEY,
-    unit      VARCHAR(32)   NOT NULL,
-    low       NUMERIC(10,3),
-    high      NUMERIC(10,3)
+CREATE TABLE adae (
+    id        SERIAL       PRIMARY KEY,
+    studyid   VARCHAR(20)  NOT NULL,
+    usubjid   VARCHAR(40)  NOT NULL REFERENCES adsl(usubjid),
+    aeseq     INT          NOT NULL,             -- sequence number within the subject
+    aeterm    VARCHAR(200) NOT NULL,             -- reported term (verbatim)
+    aedecod   VARCHAR(200) NOT NULL,             -- dictionary preferred term
+    aebodsys  VARCHAR(200) NOT NULL,             -- system organ class
+    astdt     DATE         NOT NULL,             -- start date
+    aendt     DATE,                              -- end date (NULL = ongoing)
+    aesev     VARCHAR(10)  NOT NULL CHECK (aesev IN ('MILD','MODERATE','SEVERE')),
+    aeser     CHAR(1)      NOT NULL CHECK (aeser IN ('Y','N')),          -- serious
+    aerel     VARCHAR(20)  NOT NULL,             -- relationship to study drug
+    aeacn     VARCHAR(30)  NOT NULL,             -- action taken with study drug
+    aeout     VARCHAR(40)  NOT NULL,             -- outcome
+    trtemfl   CHAR(1)      NOT NULL CHECK (trtemfl IN ('Y','N')),        -- treatment-emergent
+    UNIQUE (usubjid, aeseq)
 );
 
 -- Read-only access for this tenant's role (passed in by db/init/01_tenants.sh as :reader).

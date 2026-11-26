@@ -7,3 +7,4 @@
 | 3 | May we store keyed hashes (no content) of documents/questions/answers to verify reproducibility? | Legal | Open | Not stored; reproducibility checked only in tests |
 | 4 | Sample documents: digital or scanned? Typical size and count per session? | Data provider | Open | Synthetic fixtures; ≤5 docs, ≤30 pages |
 | 5 | Exact shape of the tenant field metadata? | Data provider | Open | `db/schema/tenant_schema.sql` + `db/seed/` |
+| 7 | May the sample CIOMS PDFs and SAS datasets be processed with Azure OpenAI (own subscription) and AI coding tools? | Data provider | Asked | No (D12): local parsing only; all external processing uses synthetic data |

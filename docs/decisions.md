@@ -110,3 +110,20 @@ Format: context → options → decision → why → consequences. Add new entri
   could echo content). `TESSERACT_CMD` points to the binary when it is not on PATH. Per-page
   timeout of 120 s.
 
+## D12. Clinical trial domain and handling of the real samples
+- **Context:** the data provider's samples are a CIOMS I adverse-reaction report (scanned PDF) and
+  CDISC ADaM datasets ADSL (subjects) and ADAE (adverse events), matched by subject id. Their README
+  says it is real study data, to be kept internal until cleared for external sharing.
+- **Decision (domain):** tenant DBs hold ADSL/ADAE-shaped tables; the document type is `cioms`, with
+  per-tenant CIOMS field metadata; `subject_id` joins to `adsl.subjid`. Patient initials and date of
+  birth are not extracted (data minimisation).
+- **Decision (samples):** strictest reading until written clearance. Real samples stay in `samples/`
+  (gitignored), are never committed, never shown to AI assistants, never sent to Azure OpenAI.
+  Only fully local steps (pypdfium2, Tesseract) may be run on them, by the developer, outside tests.
+  All development, tests and demos use synthetic data built from the public CIOMS I and ADaM structures.
+- **Why:** the challenge is about handling regulated data correctly; relaxing later is a config and
+  data swap, while a wrong "yes" can't be undone.
+- **Enforced by:** hard rule 9 in `CLAUDE.md`, deny rules for `samples/**` in `.claude/settings.json`,
+  `tests/guardrails/test_no_real_samples.py`, `.gitignore`.
+- **If cleared:** drop the real files in `samples/`, add a local loader for the SAS datasets into the
+  tenant DB, and run the same pipeline. No redesign.
