@@ -10,6 +10,9 @@ Two families of fixtures (see `fixtures/README.md` for every value):
   values; they match `db/seed/tenant_acme.sql` (ADSL/ADAE) so documents can be joined to rows.
   `cioms_followup.pdf` states a corrected onset date on page 2 (conflict for extraction).
   The layout follows the public CIOMS I sections; dates are ISO so text and seed match exactly.
+  Like the real form (D13): the subject id carries a prefix (`Subject ID 101-01001-004`), and
+  checkboxes are drawn graphics with an X, never text, so only the narrative sentence
+  "The patient was hospitalised on ..." gives `hospitalisation` a text source.
 - Generic lab reports, kept for the M1 parsing tests only (they are not in any tenant seed).
   `multi_page_report.pdf` repeats hemoglobin with *different* values (13.4 on page 1, 12.9 on
   page 3) and glucose with the *same* value.
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -80,7 +84,9 @@ MULTI_PAGE_REPORT: list[list[str]] = [
 
 
 CIOMS_CASE: dict[str, str] = {
-    "subject_id": "01001-004",
+    "subject_id": "101-01001-004",  # as printed on the form: site prefix + SUBJID (D13)
+    "subjid": "01001-004",  # adsl.subjid in the acme seed
+    "hospitalised_on": "2026-06-13",  # narrative sentence, the only text source for box 8-12
     "country": "Argentina",
     "age": "47",
     "sex": "F",
@@ -100,7 +106,12 @@ CIOMS_CASE: dict[str, str] = {
 
 
 def _box(checked: bool) -> str:
-    return "[X]" if checked else "[ ]"
+    """Placeholder for a checkbox; `_add_text_page` draws it as graphics, never as text (D13)."""
+    return "{X}" if checked else "{ }"
+
+
+_BOX = re.compile(r"(\{[X ]\})")
+BOX_MM = 3.2  # side of a drawn checkbox
 
 
 def cioms_form_lines(report_type: str) -> list[str]:
@@ -112,12 +123,13 @@ def cioms_form_lines(report_type: str) -> list[str]:
     c = CIOMS_CASE
     return [
         "CIOMS FORM - SUSPECT ADVERSE REACTION REPORT",
-        f"Study ACM-101    Subject {c['subject_id']}",
+        f"Study ACM-101    Subject ID {c['subject_id']}",
         "I. REACTION INFORMATION",
         f"1. Patient initials: PRIVACY    1a. Country: {c['country']}",
         f"2. Date of birth: PRIVACY    2a. Age: {c['age']} years    3. Sex: {c['sex']}",
         f"4-6. Reaction onset: {c['reaction_onset_date']}",
-        f"7+13. Describe reaction(s): {c['reaction_description']}",
+        f"7+13. Describe reaction(s): {c['reaction_description']}.",
+        f"      The patient was hospitalised on {c['hospitalised_on']}.",
         "8-12. Check all appropriate to adverse reaction:",
         f"  {_box(False)} patient died",
         f"  {_box(True)} involved or prolonged inpatient hospitalisation",
@@ -151,7 +163,7 @@ def cioms_followup_page2() -> list[str]:
     """Continuation page: corrects the onset date stated on page 1 (conflict for extraction)."""
     return [
         "CIOMS FORM - CONTINUATION (FOLLOW-UP)",
-        f"Study ACM-101    Subject {CIOMS_CASE['subject_id']}",
+        f"Study ACM-101    Subject ID {CIOMS_CASE['subject_id']}",
         f"Mfr control no.: {CIOMS_CASE['mfr_control_no']}",
         "",
         "Follow-up information:",
@@ -185,7 +197,27 @@ def _add_text_page(pdf: FPDF, lines: list[str], layout: Layout = Layout()) -> No
     pdf.text(15, 12, BANNER)
     pdf.set_font("Courier", size=layout.size)
     for i, line in enumerate(lines):
-        pdf.text(15, 30 + i * layout.spacing, line)
+        _draw_line(pdf, 15, 30 + i * layout.spacing, line)
+
+
+def _draw_line(pdf: FPDF, x: float, y: float, line: str) -> None:
+    """Text segments as text; `{X}` / `{ }` as a drawn box (with an X if checked)."""
+    if not _BOX.search(line):
+        pdf.text(x, y, line)  # plain line: same output as before boxes existed
+        return
+    for part in _BOX.split(line):
+        if not part:
+            continue
+        if _BOX.fullmatch(part):
+            top = y - BOX_MM + 0.4  # baseline-aligned box
+            pdf.rect(x, top, BOX_MM, BOX_MM)
+            if part == "{X}":
+                pdf.line(x, top, x + BOX_MM, top + BOX_MM)
+                pdf.line(x, top + BOX_MM, x + BOX_MM, top)
+            x += BOX_MM
+            continue
+        pdf.text(x, y, part)
+        x += pdf.get_string_width(part)
 
 
 def _add_scanned_page(pdf: FPDF, lines: list[str], layout: Layout = Layout()) -> None:

@@ -23,9 +23,13 @@ CREATE TABLE field_definitions (
     unit             VARCHAR(32),
     join_target      VARCHAR(128),
     checkbox         BOOLEAN      NOT NULL DEFAULT FALSE,  -- value is a tick mark on the form (D13)
+    -- Text printed next to the box(es) on the form (D13b). A quote containing all of a label's
+    -- words is the label, not a statement. NOT NULL so the CHECK below cannot pass on NULL.
+    box_labels       TEXT[]       NOT NULL DEFAULT '{}',
     sort_order       INT          NOT NULL DEFAULT 0,
     active           BOOLEAN      NOT NULL DEFAULT TRUE,
-    UNIQUE (document_type_id, key)
+    UNIQUE (document_type_id, key),
+    CHECK (NOT checkbox OR cardinality(box_labels) > 0)  -- every checkbox field has a label
 );
 
 -- Clinical trial data (synthetic), modeled on a subset of the public CDISC ADaM standard.

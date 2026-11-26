@@ -153,3 +153,68 @@ Format: context → options → decision → why → consequences. Add new entri
 - **Why:** a wrong "hospitalised: no" on a safety report is worse than "not determinable"; the
   join decides which subject's data the agent combines, so it must be deterministic and testable.
 
+## D13a. Amendment to D13: checkbox sources, join statuses, tenant allow-list
+Approved by the project owner with the M2 plan.
+- **Checkbox source rule (amends D13.2):** a checkbox field's quote must contain words beyond the
+  field's own label/description. Code normalizes the quote (case, accents, punctuation, OCR noise
+  such as stray single characters), splits it into words and drops stop words ("or", "the",
+  "of", ...). If every remaining word appears in the field's `label` or `description`, the quote
+  is the printed box label, not a statement, and the field is `undeterminable`. A written
+  negation ("not hospitalised") is a valid statement (`ok`, value false).
+  Implementation details found on the synthetic scanned form (M2): an enum field's allowed values
+  count as label words (the form prints the options "yes no NA", "initial followup"); tokens of
+  one or two characters that are not all digits count as OCR noise (`X]`, `XK]`, `LJ` around the
+  drawn boxes); hyphenated words also match their joined form ("follow-up" = "followup").
+- **Join only from a verified subject id (amends D13.1):** the join runs only when `subject_id`
+  is `ok`. `conflict` (different ids on different pages) → join status `ambiguous`;
+  `unverified`, `invalid` or `missing` → join status `not_attempted`, with the subject_id status
+  as the reason. The agent then says the subject could not be identified reliably; it never
+  falls back to a guess. Why: linking the wrong patient's study data is the worst error this
+  system can make.
+- **Tenant allow-list (rule 5):** before `{tenant}` is filled into `TENANT_DB_DSN_TEMPLATE`, the
+  tenant must match `^[a-z0-9_]+$` and be listed in the `TENANTS` setting (e.g. `acme,globex`),
+  so a malformed tenant value can never change the connection string.
+
+## D13b. Amendment to D13: printed box labels as metadata
+Approved by the project owner after the first M2 run against the real model.
+- **Why:** with the real Azure deployment, one run returned `patient_died = true` quoting the
+  heading "8-12. Check all appropriate to adverse reaction: patient died". The heading has words
+  beyond the field's label/description, so the D13a word rule accepted it; the next run said
+  null. The same document gave different facts (breaks D6).
+- **Metadata:** `field_definitions.box_labels TEXT[] NOT NULL DEFAULT '{}'` holds the text
+  printed next to the field's box(es) on the form, copied from the form layout (e.g.
+  `patient died`; `serious` in globex has the four seriousness labels).
+  `CHECK (NOT checkbox OR cardinality(box_labels) > 0)`: every checkbox field has at least one
+  label. The column is `NOT NULL` because a CHECK passes when it evaluates to NULL, so a NULL
+  array would slip through.
+- **Rule:** a checkbox quote is the printed label, and the field is `undeterminable`, if it
+  contains all meaningful words of any one of the field's `box_labels` (same normalization as
+  D13a: case, accents, punctuation, OCR noise, stop words; word order and extra words do not
+  matter). The D13a rule still applies as well: a quote with no words beyond the label,
+  description and options is a label quote too.
+- **Known limitation:** a narrative statement that repeats a printed label word for word (e.g.
+  "the patient died on 2026-06-20" for `patient died`) is also rejected and the field is
+  `undeterminable`. We accept this: a missed `ok` is safe (the agent says it cannot tell from
+  the document), a tick read from a printed label is not.
+- **Tests:** the real-model test runs the same form at least 3 times and asserts identical facts.
+- **Also found in that run (metadata only, no new rule):** in 1 of 9 real-model extractions
+  `suspect_drug` also listed a concomitant drug, quoting box 22. The quote is on the page, so
+  grounding cannot catch it. The `suspect_drug` description in both seeds now says
+  "Box 14 only: ...; never the concomitant drugs of box 22". If it happens again, the next step
+  is a code rule between fields (needs its own decision).
+
+## D13c. Amendment to D13: the evidence quote is the full page line
+Approved by the project owner after repeated real-model runs.
+- **Why:** with values and statuses identical across 6 runs, the model still chose how much of
+  a line to quote ("2a. Age: 47 years" in one run, "2a. Age: 47 years 3. Sex: F" in the
+  others), so the stored facts differed (breaks D6).
+- **Rule:** after grounding, code stores as `quote` the full page line(s) that hold the first
+  occurrence of the model's quote (whitespace collapsed, case kept), not the model's
+  fragment. A quote spanning lines stores all of them. Matching uses the same normalization as
+  before (NFKC, case, whitespace). An ungrounded quote is stored as the model gave it, with
+  status `unverified`.
+- **Checkbox fields:** the label rule (D13a, D13b) is applied to both the model's quote and the
+  stored line. A label fragment on a line shared with other text (OCR columns) is still a label
+  quote, even though the line has extra words.
+- **Trade-off:** a citation can be longer than needed (a whole form line, or OCR text from
+  another column on the same line).

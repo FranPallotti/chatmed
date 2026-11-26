@@ -1,11 +1,15 @@
-"""M1b: synthetic CIOMS I fixtures for acme subject 01001-004 (D12).
+"""Synthetic CIOMS I fixtures for acme subject 01001-004 (D12, D13).
 
-AC1 shapes and values, AC2 consistency with the acme seed and fixtures/README.md,
+M1b: AC1 shapes and values, AC2 consistency with the acme seed and fixtures/README.md,
 AC3 OCR of the scanned form (parser contract cases are in tests/contracts/).
+M2 AC6: like the real form, a prefixed subject id, checkboxes drawn as graphics (never text),
+and a narrative sentence that is the only text source for hospitalisation.
 """
 
 from __future__ import annotations
 
+import pypdfium2 as pdfium
+import pypdfium2.raw as pdfium_raw
 import pytest
 from make_fixtures import CIOMS_CASE, build_fixtures
 
@@ -14,7 +18,8 @@ from chatmed.parsing.pdfium import page_texts
 from tests.conftest import FIXTURES, ROOT, fixture_bytes
 
 SEED = ROOT / "db" / "seed" / "tenant_acme.sql"
-SUBJECT = CIOMS_CASE["subject_id"]
+PRINTED_ID = CIOMS_CASE["subject_id"]  # "101-01001-004": site prefix + SUBJID
+SUBJECT = CIOMS_CASE["subjid"]  # "01001-004": adsl.subjid
 ONSET = CIOMS_CASE["reaction_onset_date"]
 DRUG = CIOMS_CASE["suspect_drug"]
 
@@ -31,26 +36,37 @@ def test_initial_form_has_every_case_value() -> None:
     expected = {k: v for k, v in CIOMS_CASE.items() if k != "corrected_onset_date"}
     missing = [key for key, value in expected.items() if value not in page]
     assert not missing
-    assert f"Subject {SUBJECT}" in page
+    assert f"Subject ID {PRINTED_ID}" in page
     assert CIOMS_CASE["corrected_onset_date"] not in page
 
 
-def test_only_hospitalisation_is_checked() -> None:
-    (page,) = _texts("cioms_initial.pdf")
-    assert "[X] involved or prolonged inpatient hospitalisation" in page
-    for criterion in (
-        "patient died",
-        "involved persistent or significant disability or incapacity",
-        "life threatening",
-    ):
-        assert f"[ ] {criterion}" in page
+BOXES = 12  # 4 seriousness criteria + 3 dechallenge + 3 rechallenge + 2 report type
+CHECKED = 4  # hospitalisation, dechallenge yes, rechallenge NA, report type
 
 
-def test_dechallenge_rechallenge_and_report_type() -> None:
+def _drawn_paths(name: str) -> list[int]:
+    """Vector path objects per page: each box is one rectangle, each X two lines."""
+    doc = pdfium.PdfDocument(fixture_bytes(name))
+    try:
+        return [len(list(page.get_objects(filter=[pdfium_raw.FPDF_PAGEOBJ_PATH]))) for page in doc]
+    finally:
+        doc.close()
+
+
+@pytest.mark.parametrize("name", ["cioms_initial.pdf", "cioms_followup.pdf"])
+def test_checkboxes_are_graphics_not_text(name: str) -> None:
+    page = _texts(name)[0]
+    for marker in ("[X]", "[ ]", "{X}", "{ }", "[x]"):
+        assert marker not in page
+    assert "involved or prolonged inpatient hospitalisation" in page  # the label is text
+    assert _drawn_paths(name)[0] == BOXES + 2 * CHECKED
+
+
+def test_narrative_is_the_only_text_source_for_hospitalisation() -> None:
     (page,) = _texts("cioms_initial.pdf")
-    assert "stopping drug? [X] yes [ ] no [ ] NA" in page
-    assert "reintroduction? [ ] yes [ ] no [X] NA" in page
-    assert "[X] initial [ ] followup" in page
+    assert f"The patient was hospitalised on {CIOMS_CASE['hospitalised_on']}." in page
+    statements = [line for line in page.splitlines() if "hospitalis" in line]
+    assert len(statements) == 2  # the narrative sentence and the printed box label
 
 
 def test_scanned_form_has_no_text_layer() -> None:
@@ -59,7 +75,7 @@ def test_scanned_form_has_no_text_layer() -> None:
 
 def test_followup_corrects_onset_date_on_page_two() -> None:
     page1, page2 = _texts("cioms_followup.pdf")
-    assert "[ ] initial [X] followup" in page1
+    assert "25a. Report type: initial followup" in page1  # the tick itself is a graphic
     assert f"Reaction onset: {ONSET}" in page1
     assert f"Corrected reaction onset date: {CIOMS_CASE['corrected_onset_date']}" in page2
     assert ONSET not in page2  # the conflict is between pages, not within one
@@ -97,7 +113,7 @@ async def test_tesseract_reads_scanned_cioms(tesseract_cmd: str) -> None:
     parser = TesseractOcrParser(dpi=300, lang="eng", cmd=tesseract_cmd)
     doc = await parser.parse(fixture_bytes("cioms_initial_scanned.pdf"))
     text = doc.pages[0].text
-    for marker in (SUBJECT, ONSET, DRUG, CIOMS_CASE["mfr_control_no"]):
+    for marker in (PRINTED_ID, ONSET, DRUG, CIOMS_CASE["mfr_control_no"]):
         assert marker in text
 
 
