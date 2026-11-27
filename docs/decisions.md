@@ -576,3 +576,264 @@ Approved by the project owner with the M5a plan.
 - **check.py:** pytest runs with `.env` and `db/.env` loaded when present (the shell wins), so
   the tenant DB tests run instead of skipping, and skips are printed by reason at the end.
   `tests/conftest.py` removes `APPLICATIONINSIGHTS_CONNECTION_STRING` so tests never export.
+
+## D17. Azure deployment (M5b)
+Approved by the project owner with the M5b plan (2026-11-27). Amends D7 (what is deployed)
+and D8 (how tenant roles authenticate in Azure).
+
+**Where and in what order.** Resource group `rg-chatmed-dev` in eastus2, next to the
+Foundry resource, so model calls stay in one region. Bicep in `infra/`, every name is a
+parameter, and nothing secret is in a template or params file. The order is: base resources
+(`deploy-base.ps1`) → seed the database (`seed-db.ps1`) → build the image (`build-image.ps1`)
+→ create the app (`deploy-app.ps1`) → verify (`docs/deploy.md`). The app comes last because
+its first revision needs the image, the Key Vault secrets and the role assignments to exist.
+The agent writes the templates, scripts and docs; the developer runs every `az` command with
+their own login. `tests/test_infra.py` compiles the templates with the Bicep CLI and checks
+them, and checks the scripts as text, without calling Azure.
+
+**Resources and tiers (AC6).**
+
+| Resource | Choice | Why |
+|---|---|---|
+| Container Registry | Basic, admin user disabled | Cheapest tier (10 GB included). Pulls use the managed identity, so no registry password exists. |
+| Log Analytics + App Insights | Workspace-based App Insights | Classic App Insights is retired. One workspace holds the console logs and the exported telemetry, so one KQL query covers both. |
+| Key Vault | Standard, RBAC mode, soft delete 7 days, no purge protection, public endpoint | RBAC gives per-role access (identity: read; developer: write), with no access policies. 7 days is the minimum. Without purge protection, cleanup can purge the vault and reuse the name. Public so the developer's machine can write the passwords (weak point below). |
+| Managed identity | User-assigned, created in the base deployment | Its roles and Key Vault access exist before the app's first revision, which needs them to pull the image and resolve secrets. A system-assigned identity would only exist once the app does. |
+| Container Apps environment | Consumption-only (no workload profiles) | No environment charge. 2 vCPU / 4 GiB is the largest consumption size, which is the M5a sizing (D16). |
+| Container app | max 1 replica; `minReplicas` parameter, default 0; size profile `demo` (default) or `rated` | Sessions are in process memory (D5), so a second replica would not know them. Scale to zero and the smaller profile keep the cost down between demos (below). |
+| PostgreSQL | Flexible Server, Burstable `Standard_B1ms`, version 17, 32 GB, 7-day backups, no HA, no geo backup | Smallest tier. The synthetic tenant data is tiny. Version 17 matches the local `postgres:17`. |
+| Budget | USD 25/month, e-mail at 80 % and 100 % of actual cost | Requested by the project owner. It is an alert, not a cap. The e-mail is passed at deploy time and never committed. |
+
+**Least privilege (AC7).**
+- The app's identity has exactly `AcrPull` (registry), `Key Vault Secrets User` (vault) and
+  `Cognitive Services OpenAI User` (the Foundry resource, through a module scoped to its
+  resource group).
+- The developer has `Key Vault Secrets Officer` on the vault, only to write the generated
+  passwords and read the admin one.
+- There is no registry admin, no API key and no service principal secret in Azure.
+  `AZURE_CLIENT_ID` tells `DefaultAzureCredential` which user-assigned identity to use.
+- Deploying needs Owner (or User Access Administrator + Contributor) on the resource group and
+  on the Foundry resource, because the templates create role assignments.
+
+**Postgres admin password.**
+- Kept as a `@secure()` parameter whose default is `newGuid()`. The deployment generates it and
+  writes it to Key Vault (`pg-admin`) in the same deployment, after the server has accepted it.
+- It never appears on a command line, in a params file or in an output. A GUID has lowercase
+  letters, digits and hyphens: 3 character classes and 122 random bits, which meets Azure's
+  complexity rule.
+- **Consequence:** every redeploy of `base.bicep` generates a new one and rotates the server's
+  password and the secret together (`docs/deploy.md`). If the Key Vault write ever failed after
+  the server update, `az postgres flexible-server update --admin-password` resets it.
+- **Hardening (production):** make the developer (or a group) the Microsoft Entra admin of the
+  server and seed with an Entra access token instead, then set the admin password to an unknown
+  value. No admin password would exist at all.
+
+**Per-tenant reader passwords instead of Entra auth per tenant (AC9; amends D8).**
+- D8 expected per-tenant Entra identities in Azure. For this POC every tenant reader role has
+  its own random password, 256 bits, generated by `seed-db.ps1`.
+- The password is written straight to Key Vault as `pg-reader-<tenant>` (underscores become
+  hyphens: Key Vault and Container Apps secret names allow none) and never printed.
+- The app gets it as `PGPASSWORD_<TENANT>`, a Container Apps secret that references Key Vault
+  through the identity. It picks the password of the session's tenant, as it picks the role and
+  the database (rule 5).
+- `chatmed.tenant_db.credentials` reads all of them at startup: `PGPASSWORD_<TENANT>`, else the
+  shared `PGPASSWORD` (local development unchanged), else startup fails with
+  `MissingTenantPassword`, naming the variables and never a value. Values are `SecretStr` and
+  are passed to psycopg as the `password` keyword, never in the DSN.
+- The repository gained that parameter. It is a rules module, so **`rules-13`**: same queries
+  and rows, bumped because the module is hashed (D6). The new module decides no output and is
+  listed as such.
+- **Why not Entra now:** Entra auth per tenant needs:
+  - one managed identity per tenant, mapped to a Postgres Entra principal per tenant
+    (`pgaadauth_create_principal`);
+  - the app holding all of them and fetching a token per tenant per connection (one-hour
+    tokens as the password);
+  - local development diverging, since Docker Postgres has no Entra.
+
+  That is more than the week allows, and it is not needed to prove the three constraints.
+- **Production path:** that per-tenant identity setup, then `passwordAuth: Disabled` on the
+  server.
+
+**Database networking (AC8).**
+- Public endpoint and `require_secure_transport=ON`.
+- Firewall: "Allow Azure services" (0.0.0.0) plus the developer's IP, a parameter needed for
+  seeding.
+- **Weak point:** "Allow Azure services" lets *any* Azure resource, in any subscription,
+  attempt a connection, not only this app. What stops it is the per-tenant read-only roles, the
+  256-bit random passwords and TLS. The admin password is also exposed to guessing from Azure,
+  which is why it is random and in Key Vault.
+- **Second weak point:** on the managed server the seed script does not revoke PUBLIC's CONNECT
+  on the `postgres` database (the local init does, D8). There it could lock the admin out of
+  the database it connects to. So a reader role can open `postgres`, which holds no tenant data.
+  Each tenant database still admits only its own role, which the seed script checks.
+- **Production path:** a VNet-integrated Container Apps environment and Postgres with private
+  access (or a private endpoint), with no public endpoint. Remove the developer firewall rule
+  once seeding is done.
+
+**TLS to Postgres.**
+- The app's DSN uses `sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt`
+  (`app.bicep` parameter `postgresSslMode`, default `verify-full`). The image installs
+  `ca-certificates` explicitly.
+- The path is explicit because psycopg-binary bundles its own libpq (18) and OpenSSL, whose
+  default certificate location is not Debian's, so `sslrootcert=system` is not reliable there.
+- The seed runs psql over the same mode, from `postgres:17` plus `ca-certificates`. That image
+  has no CA bundle of its own, so `seed-db.ps1` builds a small helper image without a build
+  context. Its last step connects as each reader over that mode.
+- **Status:** to be confirmed on the real server at the first `seed-db.ps1` run (then by the
+  app's first DB read). If `verify-full` fails, the script prints the psql error; rerun with
+  `-SslMode require`, deploy the app with `postgresSslMode=require`, and record the error here.
+
+**Seeding from the developer's machine (AC10).**
+- It uses the same `db/schema` and `db/seed` files as locally, applied with psql in Docker
+  (nothing new to install on Windows) over TLS. The SQL the script runs is in `db/azure/`, not
+  inline, and `tests/test_seed_sql.py` runs it against a throwaway PostgreSQL 17.
+- **"Seeded" means the `seed_info` marker exists** in the tenant database
+  (`db/azure/is_seeded.sql`), not that the database exists (pre-merge review). `CREATE
+  DATABASE` cannot run in a transaction, so a failure after it would otherwise leave an empty
+  database that every later run reported as seeded.
+- Per tenant the steps are:
+  1. if the database exists and holds the marker, skip the tenant (nothing generated or
+     changed);
+  2. generate the reader password;
+  3. write it to Key Vault;
+  4. `tenant_role_and_database.sql`: create the role or reset its password, create the
+     database if missing, revoke PUBLIC, grant CONNECT to the role (idempotent);
+  5. `seed_tenant.sql`: schema + seed in **one transaction whose last statement creates the
+     marker**; it does nothing if the marker exists;
+  6. connect as the reader to check the password and TLS.
+
+  The Key Vault write comes before the role, so a password can never exist only in the
+  database. A failed run leaves no marker and no tables, and the next run retries the tenant
+  with a new password (tested: forced failure, then rerun ends seeded; rerun of a seeded
+  tenant changes no row and no password).
+- Reseeding a tenant on purpose means dropping its database (`docs/deploy.md`). It and a
+  retried run give the role a new password: the running app keeps the old one until its
+  revision restarts, so `deploy.md` restarts it.
+- Secrets never touch a command line, the screen or a file:
+  - the admin password is read from Key Vault into the script's environment;
+  - docker copies `PGPASSWORD` / `READER_PW` from the environment (`-e NAME`, no value);
+  - psql reads the reader password with `\getenv`;
+  - Key Vault is written over its REST API from PowerShell, because
+    `az keyvault secret set --value` would put the value in the process list and print it back.
+- psql runs with `VERBOSITY=terse` and `SHOW_CONTEXT=never`, so an error never quotes the
+  statement holding the password (checked locally against a throwaway `postgres:17`).
+- Azure's default `log_statement=none` keeps `CREATE ROLE ... PASSWORD` out of the server log.
+  Do not turn statement logging on while seeding.
+
+**Image (AC11).**
+- `build-image.ps1` refuses to run with uncommitted changes, so the tag (`chatmed:<commit>`)
+  names exactly the code in the image.
+- The build context is `git archive HEAD`, unpacked into a scratch folder, and `az acr build`
+  builds it in the cloud.
+- Only committed files can be in that context. `.env`, `db/.env` and `samples/` are gitignored
+  and never committed (`test_no_real_samples` checks the ignore rule), so **they cannot be
+  included in the image**, whatever `.dockerignore` says. `.dockerignore` stays as a second
+  layer.
+- The script prints the digest. `deploy-app.ps1` accepts only `…/chatmed@sha256:<64 hex>`,
+  never a tag, and reads the running image back from the app, so the deployed image is exactly
+  the one built. The digest is in both scripts' output.
+
+**Access (AC12).**
+- Ingress is external with `allowInsecure: false` (HTTP is redirected, never served), and one
+  IP allow-list rule (the developer's /32). With an Allow rule present, the platform rejects
+  every other address before the app, so nobody else can upload files or spend model tokens.
+- Updating the IP is one command (`docs/deploy.md`).
+- The tenant still comes from the request (D14). **Production path:** Entra login on the app
+  and the tenant from a token claim (D14).
+
+**Logs and telemetry.**
+- The environment sends console logs to Log Analytics with the workspace shared key. ARM reads
+  it with `listKeys()` at deploy time; it is never a parameter or an output (checked by
+  `test_infra.py`).
+- The App Insights connection string is a Container Apps secret. It only allows ingestion.
+- Both stay metadata-only (D16).
+- **Production path:** `azure-monitor` log destination with diagnostic settings (no shared
+  key), and App Insights with local auth disabled plus an Entra-authenticated exporter, which
+  needs a credential passed in `chatmed.telemetry`.
+- Container Apps cannot mount the root filesystem read-only, unlike compose (D16). So the
+  no-write check is the `find / -xdev -newer /app -type f` run of AC13.
+
+**Scale to zero and size profiles (amends AC6's min = max = 1; owner's decision, cost).**
+- `minReplicas` is a parameter of `app.bicep`, default **0**, and `maxReplicas` stays 1 (D5).
+- With 0, Container Apps stops the only replica after about 5 minutes without requests (the
+  HTTP scale rule's cooldown). The process shuts down like any shutdown: the lifespan closes
+  every open session (`session.closed` with reason `shutdown`), so nothing outlives the
+  process, which is consistent with D5.
+- The next request waits for a cold start (image pull and startup, tens of seconds), and the
+  old session ids answer `session_not_found`.
+- Because 5 idle minutes are far less than `SESSION_TTL_SECONDS` (30 min), set it to 1 before
+  a demo, with one command (`docs/deploy.md`), and back to 0 after. Changing it creates a new
+  revision, which also wipes open sessions.
+- The container size is a parameter, `sizeProfile`. It sets the container and the limits that
+  bound its memory together:
+
+  | Profile | Container | `MAX_SESSIONS` | `OCR_MAX_CONCURRENCY` | Worst case (architecture.md) |
+  |---|---|---|---|---|
+  | `demo` (default) | 1 vCPU / 2 GiB | 3 | 1 | 1363 MB of 2048 (685 MB headroom) |
+  | `rated` | 2 vCPU / 4 GiB | 8 | 2 | 3102 MB of 4096 (994 MB headroom); the measured worst case (D16) |
+
+  `demo` serves one presenter, with OCR one page at a time. `rated` is the configuration the
+  M5a sizing and load measurement cover. Both are operational settings (no effect on facts or
+  fingerprints).
+- PostgreSQL can be stopped between demos (`az postgres flexible-server stop`), which stops
+  compute billing; storage is still billed. Azure starts a stopped server again by itself
+  after 7 days, so a long pause needs a stop each week (`docs/deploy.md`).
+
+**Cost estimate (AC14).**
+- Unit prices are Azure list pay-as-you-go prices for eastus2, from the Azure Retail Prices
+  API, read 2026-11-27. That API is the price source of the pricing calculator. The
+  calculator itself was not used: it is interactive, and its pages render no figures for
+  automated reading.
+- A month is 730 h (2,628,000 s). The free grant of Container Apps is per subscription and
+  month: 180,000 vCPU-s, 360,000 GiB-s and 2 M requests. It assumes no other app in the
+  subscription uses it.
+
+| Unit price | |
+|---|---|
+| Container Apps active | vCPU $0.000024/s, memory $0.000003/GiB-s |
+| Container Apps idle (replicas kept by `minReplicas`, below the idle thresholds) | vCPU $0.000003/s, memory $0.000003/GiB-s |
+| PostgreSQL B1ms compute | $0.017/h (billed only while started) |
+| PostgreSQL storage | $0.115/GB-month (billed while stopped too) |
+| PostgreSQL backup storage | $0.095/GB-month beyond the included amount (included amount not checked) |
+| Container Registry Basic | $0.1666/day |
+| Key Vault operations | $0.03 per 10,000 |
+| Log Analytics ingestion | first 5 GB/month per billing account free, then $2.76/GB |
+
+**Scenarios.**
+- *Demo month* (the intended use): `minReplicas` 0, set to 1 only during about 20 demo hours;
+  Postgres started for about 24 hours (3 demo days) and stopped otherwise.
+- *Always on*: `minReplicas` 1 and Postgres running all month.
+- The free grant covers 50 running hours of `demo` (1 vCPU / 2 GiB) or 25 hours of `rated`;
+  after that, each running hour costs about $0.108 (`demo`) or $0.216 (`rated`).
+
+| Resource, per month | Demo month, `demo` | Demo month, `rated` | Always on, `demo` | Always on, `rated` |
+|---|---|---|---|---|
+| Container app | $0 (20 h in the free grant) | $0 (20 h in the free grant) | ≈ $22.03 | ≈ $45.68 |
+| PostgreSQL compute | ≈ $0.41 (24 h) | ≈ $0.41 | $12.41 | $12.41 |
+| PostgreSQL storage (32 GB) | $3.68 | $3.68 | $3.68 | $3.68 |
+| Container Registry Basic | ≈ $5.07 | ≈ $5.07 | ≈ $5.07 | ≈ $5.07 |
+| Key Vault, Log Analytics, requests | < $0.10 | < $0.10 | < $0.10 | < $0.10 |
+| **Total** (plus backup storage, at most ≈ $3, not checked) | **≈ $9.2** | **≈ $9.2** | **≈ $43.2** | **≈ $66.8** |
+
+- With the USD 25 budget, a demo month stays well below the 80 % alert ($20).
+- Scaling to zero but leaving Postgres running costs ≈ $21.2, which fires the 80 % alert near
+  month end; so does running `rated` for more than about 60 hours.
+- Always on exceeds the budget in either profile, which is what the alerts are for.
+
+**Known weak points and their production path.**
+
+| Weak point (POC) | Production path |
+|---|---|
+| Public Postgres endpoint, "Allow Azure services" | VNet-integrated environment, private access, no public endpoint |
+| Reader roles can open the empty `postgres` database | Same private network; admin-only maintenance database |
+| Password auth for readers (Key Vault) and admin | Per-tenant managed identities with Entra auth; Entra admin; `passwordAuth: Disabled` |
+| Tenant chosen in the request; access by IP allow-list | Entra login on the app; tenant from a token claim (D14) |
+| Log Analytics shared key; App Insights ingestion key | `azure-monitor` destination with diagnostic settings; App Insights local auth off |
+| `sslmode=verify-full` pending first-run confirmation | Confirmed setting recorded here; pin Azure's root CAs only |
+| Writable container root filesystem | Checked by the AC13 `find`; read-only root when the platform allows it |
+| Key Vault on a public endpoint (`publicNetworkAccess: Enabled`, no network rules): anyone can reach it, access still needs an Entra token with an RBAC role | Private endpoint in the app's VNet, `publicNetworkAccess: Disabled` (seeding from a jump host or a pipeline inside the network) |
+| Reseeding rotates a reader password; the running app keeps the old one until restarted | Entra auth per tenant (no password to rotate); otherwise a restart step in the reseed runbook, as now |
+| Admin password rotates on every base redeploy | Entra admin, no password |
+| Budget is an alert, not a cap | Same; add an action group that stops or deletes the app if needed |
+| Scale to zero wipes sessions after ~5 idle minutes; cold start on the next request | `minReplicas` 1 (`rated`) for real use; sessions outliving a replica need the encrypted store (stretch) |
+| A stopped Postgres restarts by itself after 7 days | Same; a scheduled stop (automation) if pauses are long |

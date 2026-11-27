@@ -67,7 +67,9 @@ PROMPT_VERSION = "extract-v2"  # v2 (D13): OCR noise, interleaved columns, check
 #           second model call; rules-10's `statement` removed from the tool result (D14)
 # rules-12: rendered reconciliation ends with RECONCILIATION_SCOPE (covers only the
 #           comparison); loop docstrings name the early exit (D14)
-RULES_VERSION = "rules-12"
+# rules-13: the tenant repository takes the tenant's reader password (M5b AC9, D17); same
+#           queries and rows, bumped because the module is hashed
+RULES_VERSION = "rules-13"
 
 
 class ExtractionError(RuntimeError):

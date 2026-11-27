@@ -29,6 +29,8 @@ NOT_OUTPUT_DECIDING = {
     "chatmed.session.base": "storage interface",
     "chatmed.session.memory": "storage; every consumer sorts documents itself (by sha256)",
     "chatmed.tenant_db": "re-exports",
+    "chatmed.tenant_db.credentials": "which password a tenant's read-only role uses (D17); "
+    "the role, database and queries are unchanged",
     "chatmed.telemetry": "exports metadata-only logs and request spans; never changes an answer",
 }
 

@@ -65,8 +65,13 @@ uv run pytest -q             # all tests
 uv run ruff check . && uv run ruff format --check .
 uv run mypy src
 uv run python scripts/check.py   # all of the above + forbidden-pattern guard. Must pass before "done".
-uv run uvicorn chatmed.api:app --reload   # once M3+ exists
+uv run --env-file .env --env-file db/.env uvicorn chatmed.api:app --reload   # the app (M3+)
 ```
+
+The app reads the tenant DB passwords from the environment at startup (`PGPASSWORD` from
+`db/.env`, D17) and refuses to start without them, so run it with both env files as above.
+Dev prerequisites besides `uv`: Docker (tenant DBs, seed SQL tests) and the Bicep CLI
+(`az bicep install`; `tests/test_infra.py` compiles `infra/` and fails without it).
 
 ## Layout
 

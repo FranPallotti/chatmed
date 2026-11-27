@@ -76,7 +76,8 @@ class Settings(BaseSettings):
     duckdb_memory_limit: str = "128MB"  # per session; see architecture.md
 
     # Tenant DB (D8): one database per tenant, chosen by code from the session's tenant.
-    # Read-only role; no password in the DSN (Entra token in Azure, PGPASSWORD env locally).
+    # Read-only role; no password in the DSN: PGPASSWORD_<TENANT> (Azure, from Key Vault) or
+    # the shared PGPASSWORD (local), read by chatmed.tenant_db.credentials (D17).
     tenant_db_dsn_template: str
     tenants: str = "acme,globex"  # comma-separated allow-list (D13a); see `tenant_ids`
 

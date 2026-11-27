@@ -49,6 +49,7 @@ from chatmed.tenant_db import (
     TenantNotAllowed,
     TenantRepository,
     UnknownDocumentType,
+    tenant_db_passwords,
     tenant_dsn,
 )
 
@@ -70,6 +71,9 @@ class Services:
 
 
 async def build_services(settings: Settings) -> Services:
+    """The production services. Reads every tenant's DB password first, so a deployment
+    missing one fails at startup, not at that tenant's first question (M5b AC9)."""
+    passwords = tenant_db_passwords(settings)
     return Services(
         settings=settings,
         store=InMemorySessionStore(
@@ -80,7 +84,9 @@ async def build_services(settings: Settings) -> Services:
         ),
         parser=await build_parser(settings),
         model_client=make_client(settings.azure_openai_endpoint, settings.azure_openai_api_version),
-        repo_factory=lambda tenant: PostgresTenantRepository(settings, tenant),
+        repo_factory=lambda tenant: PostgresTenantRepository(
+            settings, tenant, passwords.get(tenant)
+        ),
     )
 
 
