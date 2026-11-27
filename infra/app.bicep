@@ -82,19 +82,40 @@ resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' existin
   name: postgresServerName
 }
 
-// Memory limits scale with the container (worst case per profile: architecture.md).
+// Container size and the limits that bound its memory, together (worst case per profile:
+// architecture.md). Plain values, so tests/test_infra.py can check them as data.
 var profiles = {
   demo: {
-    cpu: '1.0'
-    memory: '2Gi'
-    maxSessions: '3'
-    ocrMaxConcurrency: '1'
+    resources: {
+      cpu: 1
+      memory: '2Gi'
+    }
+    env: [
+      {
+        name: 'MAX_SESSIONS'
+        value: '3'
+      }
+      {
+        name: 'OCR_MAX_CONCURRENCY'
+        value: '1'
+      }
+    ]
   }
   rated: {
-    cpu: '2.0'
-    memory: '4Gi'
-    maxSessions: '8'
-    ocrMaxConcurrency: '2'
+    resources: {
+      cpu: 2
+      memory: '4Gi'
+    }
+    env: [
+      {
+        name: 'MAX_SESSIONS'
+        value: '8'
+      }
+      {
+        name: 'OCR_MAX_CONCURRENCY'
+        value: '2'
+      }
+    ]
   }
 }
 var size = profiles[sizeProfile]
@@ -174,10 +195,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
         {
           name: 'chatmed'
           image: image
-          resources: {
-            cpu: json(size.cpu)
-            memory: size.memory
-          }
+          resources: size.resources
           env: concat(
             [
               {
@@ -205,18 +223,11 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
                 value: join(tenants, ',')
               }
               {
-                name: 'MAX_SESSIONS'
-                value: size.maxSessions
-              }
-              {
-                name: 'OCR_MAX_CONCURRENCY'
-                value: size.ocrMaxConcurrency
-              }
-              {
                 name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
                 secretRef: 'appinsights-connection-string'
               }
             ],
+            size.env,
             readerEnv
           )
           probes: [

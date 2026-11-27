@@ -90,7 +90,9 @@ Order: base → seed → image → app → verify (D17). Run from the repository
    ```
 
    For each tenant it prints `seeded; chatmed_reader_<t> reads N field definitions over
-   sslmode=verify-full`, or `already seeded, nothing changed`. No password is printed.
+   sslmode=verify-full`, or `already seeded, nothing changed`. No password is printed. If a
+   run fails, run it again: a tenant without the `seed_info` marker is seeded again
+   ([Reseed a tenant](#reseed-a-tenant)).
    If `verify-full` fails, the psql error is printed: rerun with `-SslMode require`, pass
    `postgresSslMode=require` to the app (edit `infra/app.bicepparam`) and record the error
    in D17.
@@ -110,6 +112,35 @@ Order: base → seed → image → app → verify (D17). Run from the repository
    ```
 
    It prints the app URL and the image digest the app is running.
+
+### Reseed a tenant
+
+A tenant counts as seeded once its database holds the `seed_info` marker, which the seed
+writes in the same transaction as the data. So a run that failed is simply retried by running
+`seed-db.ps1` again; there is nothing to clean up. To seed a tenant again on purpose (for
+example after changing `db/seed/tenant_acme.sql`), drop its database, then seed it:
+
+```powershell
+$fqdn = az postgres flexible-server show -g rg-chatmed-dev -n psql-chatmed-dev-01 --query fullyQualifiedDomainName -o tsv
+$env:PGPASSWORD = az keyvault secret show --vault-name kv-chatmed-dev-01 --name pg-admin --query value -o tsv
+docker run --rm -e PGPASSWORD chatmed-psql:17 psql "host=$fqdn user=chatmed_admin dbname=postgres sslmode=verify-full sslrootcert=/etc/ssl/certs/ca-certificates.crt" -c "DROP DATABASE tenant_acme WITH (FORCE);"
+Remove-Item Env:PGPASSWORD
+```
+
+```powershell
+.\infra\seed-db.ps1 -Tenants acme
+```
+
+Seeding gives the reader role a new password (in Key Vault and in Postgres), and the running
+app still holds the old one. Restart its revision so it reads the new one:
+
+```powershell
+az containerapp revision restart -g rg-chatmed-dev -n ca-chatmed --revision (az containerapp show -g rg-chatmed-dev -n ca-chatmed --query properties.latestRevisionName -o tsv)
+```
+
+If that tenant's questions still fail with `tenant_db.* status=error` in the logs, the Key
+Vault reference has not refreshed yet (Container Apps refreshes them periodically): wait a few
+minutes and restart again. The same applies after a retried failed seed while the app runs.
 
 ### Update (new image)
 

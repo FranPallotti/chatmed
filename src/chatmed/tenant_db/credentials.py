@@ -5,9 +5,10 @@ app as `PGPASSWORD_<TENANT>` (a Container Apps secret that references Key Vault 
 managed identity). Locally the shared `PGPASSWORD` from `db/.env` keeps working. The password
 is picked by the session's tenant, the same way the role and the database are (rule 5).
 
-They are read once at startup, so a deployment that lacks a tenant's password fails before it
-serves anyone instead of at that tenant's first question. Values are `SecretStr` and are never
-logged or put in an error message; errors name the environment variable only.
+The passwords of all allowed tenants are read once, at startup, so a deployment that lacks
+one fails before it serves anyone instead of at that tenant's first question. Values are
+`SecretStr` and are never logged or put in an error message; errors name the environment
+variable only.
 """
 
 from __future__ import annotations

@@ -179,9 +179,11 @@ Record the decisions below as D17.
 - AC6 Infra as code (Bicep, parameters for every name, nothing secret in templates or params files):
   Container Registry (Basic, admin user disabled); Log Analytics + workspace-based App Insights;
   Key Vault (RBAC mode); a **user-assigned** managed identity created before the app; Container
-  Apps environment (Consumption-only) and the app with **min = max = 1 replica** (in-memory sessions,
-  D5; always on so the demo never waits for a cold start), 2 vCPU / 4 GiB; Azure Database for
-  PostgreSQL Flexible Server, smallest Burstable tier, version 17.
+  Apps environment (Consumption-only) and the app with **at most 1 replica** (in-memory sessions,
+  D5): `minReplicas` a parameter, default 0 (scale to zero, sessions wiped on scale-in; set 1
+  before a demo), and a size profile, `demo` 1 vCPU / 2 GiB (`MAX_SESSIONS=3`,
+  `OCR_MAX_CONCURRENCY=1`) or `rated` 2 vCPU / 4 GiB (8 and 2, the measured worst case) (D17);
+  Azure Database for PostgreSQL Flexible Server, smallest Burstable tier, version 17.
 - AC7 Least privilege: the identity gets exactly `AcrPull` (registry), `Key Vault Secrets User`
   (vault) and `Cognitive Services OpenAI User` (Foundry resource). The developer gets
   `Key Vault Secrets Officer` on the vault, only to write the generated passwords. No registry

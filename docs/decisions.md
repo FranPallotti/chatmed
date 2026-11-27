@@ -597,7 +597,7 @@ them, and checks the scripts as text, without calling Azure.
 |---|---|---|
 | Container Registry | Basic, admin user disabled | Cheapest tier (10 GB included). Pulls use the managed identity, so no registry password exists. |
 | Log Analytics + App Insights | Workspace-based App Insights | Classic App Insights is retired. One workspace holds the console logs and the exported telemetry, so one KQL query covers both. |
-| Key Vault | Standard, RBAC mode, soft delete 7 days, no purge protection | RBAC gives per-role access (identity: read; developer: write), with no access policies. 7 days is the minimum. Without purge protection, cleanup can purge the vault and reuse the name. |
+| Key Vault | Standard, RBAC mode, soft delete 7 days, no purge protection, public endpoint | RBAC gives per-role access (identity: read; developer: write), with no access policies. 7 days is the minimum. Without purge protection, cleanup can purge the vault and reuse the name. Public so the developer's machine can write the passwords (weak point below). |
 | Managed identity | User-assigned, created in the base deployment | Its roles and Key Vault access exist before the app's first revision, which needs them to pull the image and resolve secrets. A system-assigned identity would only exist once the app does. |
 | Container Apps environment | Consumption-only (no workload profiles) | No environment charge. 2 vCPU / 4 GiB is the largest consumption size, which is the M5a sizing (D16). |
 | Container app | max 1 replica; `minReplicas` parameter, default 0; size profile `demo` (default) or `rated` | Sessions are in process memory (D5), so a second replica would not know them. Scale to zero and the smaller profile keep the cost down between demos (below). |
@@ -685,18 +685,30 @@ them, and checks the scripts as text, without calling Azure.
 
 **Seeding from the developer's machine (AC10).**
 - It uses the same `db/schema` and `db/seed` files as locally, applied with psql in Docker
-  (nothing new to install on Windows) over TLS.
+  (nothing new to install on Windows) over TLS. The SQL the script runs is in `db/azure/`, not
+  inline, and `tests/test_seed_sql.py` runs it against a throwaway PostgreSQL 17.
+- **"Seeded" means the `seed_info` marker exists** in the tenant database
+  (`db/azure/is_seeded.sql`), not that the database exists (pre-merge review). `CREATE
+  DATABASE` cannot run in a transaction, so a failure after it would otherwise leave an empty
+  database that every later run reported as seeded.
 - Per tenant the steps are:
-  1. if `tenant_<t>` already exists, stop for that tenant ("already seeded", nothing changed);
+  1. if the database exists and holds the marker, skip the tenant (nothing generated or
+     changed);
   2. generate the reader password;
   3. write it to Key Vault;
-  4. create or reset the role;
-  5. create the database, revoke PUBLIC, grant CONNECT to the role;
-  6. apply the schema and seed in one transaction;
-  7. connect as the reader to check the password and TLS.
+  4. `tenant_role_and_database.sql`: create the role or reset its password, create the
+     database if missing, revoke PUBLIC, grant CONNECT to the role (idempotent);
+  5. `seed_tenant.sql`: schema + seed in **one transaction whose last statement creates the
+     marker**; it does nothing if the marker exists;
+  6. connect as the reader to check the password and TLS.
 
   The Key Vault write comes before the role, so a password can never exist only in the
-  database.
+  database. A failed run leaves no marker and no tables, and the next run retries the tenant
+  with a new password (tested: forced failure, then rerun ends seeded; rerun of a seeded
+  tenant changes no row and no password).
+- Reseeding a tenant on purpose means dropping its database (`docs/deploy.md`). It and a
+  retried run give the role a new password: the running app keeps the old one until its
+  revision restarts, so `deploy.md` restarts it.
 - Secrets never touch a command line, the screen or a file:
   - the admin password is read from Key Vault into the script's environment;
   - docker copies `PGPASSWORD` / `READER_PW` from the environment (`-e NAME`, no value);
@@ -819,6 +831,8 @@ them, and checks the scripts as text, without calling Azure.
 | Log Analytics shared key; App Insights ingestion key | `azure-monitor` destination with diagnostic settings; App Insights local auth off |
 | `sslmode=verify-full` pending first-run confirmation | Confirmed setting recorded here; pin Azure's root CAs only |
 | Writable container root filesystem | Checked by the AC13 `find`; read-only root when the platform allows it |
+| Key Vault on a public endpoint (`publicNetworkAccess: Enabled`, no network rules): anyone can reach it, access still needs an Entra token with an RBAC role | Private endpoint in the app's VNet, `publicNetworkAccess: Disabled` (seeding from a jump host or a pipeline inside the network) |
+| Reseeding rotates a reader password; the running app keeps the old one until restarted | Entra auth per tenant (no password to rotate); otherwise a restart step in the reseed runbook, as now |
 | Admin password rotates on every base redeploy | Entra admin, no password |
 | Budget is an alert, not a cap | Same; add an action group that stops or deletes the app if needed |
 | Scale to zero wipes sessions after ~5 idle minutes; cold start on the next request | `minReplicas` 1 (`rated`) for real use; sessions outliving a replica need the encrypted store (stretch) |

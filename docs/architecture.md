@@ -320,6 +320,8 @@ logs/telemetry (metadata only) ─► Log Analytics + workspace-based App Insigh
 ```
 
 The Postgres admin password is generated in the deployment and kept in Key Vault (`pg-admin`);
-the seed script (developer's machine, psql in Docker) creates each tenant's database and role
-with a random password written straight to Key Vault. Public Postgres endpoint with TLS and a
+the seed script (developer's machine, psql in Docker, SQL in `db/azure/`) creates each
+tenant's database and role with a random password written straight to Key Vault, and seeds it
+in one transaction ending with a `seed_info` marker: a tenant is seeded once the marker
+exists, so a failed run is retried by running the script again. Public Postgres endpoint with TLS and a
 firewall of Azure services + the developer IP (POC; private access in production, D17).

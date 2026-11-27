@@ -5,12 +5,17 @@ the Azure PostgreSQL server (AC9, AC10), with the same db/schema and db/seed fil
 
 .DESCRIPTION
 For each tenant:
-  1. stops for that tenant if tenant_<t> already exists ("already seeded", nothing changed);
+  1. skips the tenant if it is seeded: tenant_<t> exists and holds the seed_info marker
+     (db/azure/is_seeded.sql). Nothing is generated or changed;
   2. generates a random reader password in memory and writes it straight to Key Vault as
      pg-reader-<t> (REST call from this process, nothing printed);
-  3. creates (or resets) the role chatmed_reader_<t> with that password, creates the database,
-     lets only that role connect, and applies db/schema + db/seed in one transaction;
-  4. connects as the reader over the same TLS mode to check the password and TLS work.
+  3. creates the role chatmed_reader_<t> (or resets its password) and the database if
+     missing, and lets only that role connect (db/azure/tenant_role_and_database.sql);
+  4. applies db/schema + db/seed in one transaction that ends by creating the seed_info
+     marker (db/azure/seed_tenant.sql). A failure leaves no marker and no tables, so
+     running the script again retries that tenant;
+  5. connects as the reader over the same TLS mode to check the password and TLS work.
+The SQL files are tested against PostgreSQL 17 by tests/test_seed_sql.py.
 
 psql runs from the postgres:17 image plus ca-certificates (built here once, from no build
 context), so nothing is installed on Windows. Secrets reach the container as environment
@@ -72,8 +77,13 @@ function Set-KeyVaultSecret {
             -Uri "https://$KeyVaultName.vault.azure.net/secrets/${Name}?api-version=7.4" `
             -Headers @{ Authorization = "Bearer $token" } | Out-Null
     } catch {
-        # The status only: the exception text could quote the request.
-        throw "writing Key Vault secret $Name failed (HTTP $($_.Exception.Response.StatusCode.value__)); a new role assignment can take a few minutes, then rerun"
+        # The status only: the exception text could quote the request. A network or TLS
+        # failure has no response at all (and StrictMode forbids reading a missing property).
+        $response = $_.Exception.PSObject.Properties['Response']
+        if ($response -and $response.Value) {
+            throw "writing Key Vault secret $Name failed (HTTP $([int]$response.Value.StatusCode)); a new role assignment can take a few minutes, then rerun"
+        }
+        throw "writing Key Vault secret $Name failed (no response from Key Vault)"
     }
 }
 
@@ -130,8 +140,12 @@ try {
         $exists = Invoke-Psql -Database 'postgres' -PsqlArgs @('-tA', '-v', "db=$db") `
             -Sql "SELECT 1 FROM pg_database WHERE datname = :'db';"
         if ("$exists".Trim() -eq '1') {
-            Write-Host "${db}: already seeded, nothing changed. To seed it again, drop it first (docs/deploy.md)."
-            continue
+            $seeded = Invoke-Psql -Database $db -PsqlArgs @('-tA', '-f', '/db/azure/is_seeded.sql')
+            if ("$seeded".Trim() -eq 't') {
+                Write-Host "${db}: already seeded, nothing changed. To seed it again, see 'Reseed a tenant' in docs/deploy.md."
+                continue
+            }
+            Write-Host "${db}: exists without the seed_info marker (an earlier run failed); seeding it again..."
         }
 
         Write-Host "${db}: generating the reader password and writing it to Key Vault..."
@@ -139,23 +153,14 @@ try {
         Set-KeyVaultSecret -Name (Get-ReaderSecretName $tenant) -Value $env:READER_PW `
             -ContentType "password of $role"
 
-        Write-Host "${db}: creating the role and the database..."
-        $setup = @'
-\getenv pw READER_PW
-SELECT format(CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'role')
-                   THEN 'ALTER ROLE %I LOGIN PASSWORD %L'
-                   ELSE 'CREATE ROLE %I LOGIN PASSWORD %L' END, :'role', :'pw') \gexec
-\unset pw
-CREATE DATABASE :"db";
-REVOKE CONNECT, TEMPORARY ON DATABASE :"db" FROM PUBLIC;
-GRANT CONNECT ON DATABASE :"db" TO :"role";
-'@
-        Invoke-Psql -Database 'postgres' -PsqlArgs @('-v', "db=$db", '-v', "role=$role") -Sql $setup | Out-Null
+        Write-Host "${db}: role and database..."
+        Invoke-Psql -Database 'postgres' -PsqlArgs @(
+            '-v', "db=$db", '-v', "role=$role", '-f', '/db/azure/tenant_role_and_database.sql'
+        ) | Out-Null
 
-        Write-Host "${db}: applying db/schema and db/seed in one transaction..."
+        Write-Host "${db}: db/schema + db/seed and the seed_info marker, in one transaction..."
         Invoke-Psql -Database $db -PsqlArgs @(
-            '-1', '-v', "reader=$role",
-            '-f', '/db/schema/tenant_schema.sql', '-f', "/db/seed/$db.sql"
+            '-v', "reader=$role", '-v', "seedfile=/db/seed/$db.sql", '-f', '/db/azure/seed_tenant.sql'
         ) | Out-Null
 
         # The app's path: the reader role, its own password, the same TLS mode.

@@ -3,9 +3,12 @@
 The Bicep files are compiled with the local Bicep CLI (installed by `az bicep install`) and
 the ARM JSON is checked: resources and tiers, the identity's exact roles, no registry admin,
 one always-on replica, HTTPS-only ingress behind an IP allow-list, TLS on Postgres, Key Vault
-references for the tenant passwords, no secret in any output or parameter default. Without the
-Bicep CLI those tests skip with a reason (check.py prints it). The PowerShell scripts are
-checked as text for the secret-handling rules of AC9-AC11. Nothing here calls Azure.
+references for the tenant passwords, no secret in any output or parameter default. Checks
+read the compiled JSON as data (resource types, literal values, parameter defaults) and only
+fall back to an expression's text where a value is computed at deploy time. The Bicep CLI is
+a dev prerequisite (README): without it these tests fail with the install command. The
+PowerShell scripts are checked as text for the secret-handling rules of AC9-AC11; the seed
+SQL they run is tested against PostgreSQL in test_seed_sql.py. Nothing here calls Azure.
 """
 
 from __future__ import annotations
@@ -47,7 +50,9 @@ def compiled(name: str) -> dict[str, Any]:
     """ARM JSON of infra/<name>.bicep (modules inlined as nested deployments)."""
     bicep = _bicep()
     if bicep is None:
-        pytest.skip("Bicep CLI not installed (az bicep install)")
+        pytest.fail(
+            "Bicep CLI not found: it is a dev prerequisite, install it with `az bicep install`"
+        )
     result = subprocess.run(
         [bicep, "build", str(INFRA / f"{name}.bicep"), "--stdout"],
         capture_output=True,
@@ -123,23 +128,21 @@ def test_size_profiles_set_container_size_and_matching_limits() -> None:
     template = compiled("app")
     assert template["parameters"]["sizeProfile"]["defaultValue"] == "demo"
     assert template["parameters"]["sizeProfile"]["allowedValues"] == ["demo", "rated"]
-    assert template["variables"]["profiles"] == {
-        "demo": {"cpu": "1.0", "memory": "2Gi", "maxSessions": "3", "ocrMaxConcurrency": "1"},
-        "rated": {"cpu": "2.0", "memory": "4Gi", "maxSessions": "8", "ocrMaxConcurrency": "2"},
+    profiles = template["variables"]["profiles"]
+    sizes = {name: p["resources"] for name, p in profiles.items()}
+    limits = {name: {e["name"]: e["value"] for e in p["env"]} for name, p in profiles.items()}
+    assert sizes == {"demo": {"cpu": 1, "memory": "2Gi"}, "rated": {"cpu": 2, "memory": "4Gi"}}
+    assert limits == {
+        "demo": {"MAX_SESSIONS": "3", "OCR_MAX_CONCURRENCY": "1"},
+        "rated": {"MAX_SESSIONS": "8", "OCR_MAX_CONCURRENCY": "2"},  # measured worst case
     }
+    # The container takes both from the chosen profile (deploy-time references).
     (container,) = one(template, "Microsoft.App/containerApps")["properties"]["template"][
         "containers"
     ]
-    assert container["resources"] == {
-        "cpu": "[json(variables('size').cpu)]",
-        "memory": "[variables('size').memory]",
-    }
-    env = container["env"]  # one concat() expression: the fixed entries + one per tenant
-    assert "createObject('name', 'MAX_SESSIONS', 'value', variables('size').maxSessions)" in env
-    assert (
-        "createObject('name', 'OCR_MAX_CONCURRENCY', 'value', variables('size').ocrMaxConcurrency)"
-        in env
-    )
+    assert container["resources"] == "[variables('size').resources]"
+    assert "variables('size').env" in container["env"]
+    assert template["variables"]["size"] == "[variables('profiles')[parameters('sizeProfile')]]"
 
 
 # ---------------------------------------------------------------- AC7 least privilege
@@ -297,18 +300,27 @@ def test_seed_script_never_puts_a_secret_on_a_command_line_or_screen() -> None:
     for var in ("PGPASSWORD", "READER_PW"):
         assert f"'-e', '{var}'" in text
         assert not re.search(rf"-e\W+{var}=", text)
-    assert r"\getenv pw READER_PW" in text
+    sql = (ROOT / "db" / "azure" / "tenant_role_and_database.sql").read_text(encoding="utf-8")
+    assert r"\getenv pw READER_PW" in sql  # psql reads it from the environment
     assert "VERBOSITY=terse" in text  # psql errors without the statement text
     for line in text.splitlines():
         if re.match(r"\s*(Write-Host|Write-Output)", line):
             assert not re.search(r"READER_PW|PGPASSWORD|\$token|adminPassword", line), line
 
 
-def test_seed_script_stops_for_an_already_seeded_tenant_and_reads_admin_from_key_vault() -> None:
+def test_seed_script_runs_the_tested_sql_files_and_skips_on_the_marker() -> None:
     text = script("seed-db.ps1")
+    # The SQL lives in db/azure/ (tested in test_seed_sql.py), not inline in the script.
+    for name in ("is_seeded.sql", "tenant_role_and_database.sql", "seed_tenant.sql"):
+        assert f"/db/azure/{name}" in text
+        assert (ROOT / "db" / "azure" / name).is_file()
+    assert "CREATE DATABASE" not in text and "CREATE ROLE" not in text
+    # Skip only on the marker; generate a password only after that check.
+    assert text.index("/db/azure/is_seeded.sql'") < text.index(
+        "$env:READER_PW = New-ReaderPassword"
+    )
     assert "already seeded, nothing changed" in text
     assert "--name pg-admin" in text
-    assert "'-1'" in text  # schema + seed in one transaction
 
 
 def test_build_script_builds_committed_code_and_returns_a_digest() -> None:
