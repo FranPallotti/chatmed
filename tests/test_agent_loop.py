@@ -72,22 +72,8 @@ def hospitalised_script(sha: str) -> list[Any]:
 
 
 def reconcile_script(sha: str) -> list[Any]:
-    s = sha[:12]
-    return [
-        tool_call("reconcile_case", {"doc_sha": s}),
-        final(
-            "The CIOMS matches ADAE event 2 of subject 01001-004: the onset date 2026-06-12 "
-            "matches and seriousness (Y) matches. Action taken and outcome are not comparable: "
-            "the form has no such fields.",
-            [
-                f"recon:{s}:onset_date",
-                f"recon:{s}:seriousness",
-                f"recon:{s}:action_taken",
-                f"recon:{s}:outcome",
-                "adae:ACM-101-01001-004:2",
-            ],
-        ),
-    ]
+    """agent-v7: the model only calls reconcile_case; code renders the answer (D14)."""
+    return [tool_call("reconcile_case", {"doc_sha": sha[:12]})]
 
 
 async def test_demo_arm_question(recorded: FakeModelClient) -> None:
@@ -140,14 +126,7 @@ async def test_demo_reconciliation_on_followup_reports_onset_conflict(
 ) -> None:
     setup = await setup_session(recorded, ["cioms_followup.pdf"])
     s = setup.shas["cioms_followup.pdf"][:12]
-    script = [
-        tool_call("reconcile_case", {"doc_sha": s}),
-        final(
-            "Onset is not comparable: the report has a conflict (2026-06-11 vs 2026-06-12). "
-            "Seriousness matches. Action taken and outcome are not comparable.",
-            [f"recon:{s}:onset_date", f"recon:{s}:seriousness", f"recon:{s}:action_taken"],
-        ),
-    ]
+    script = reconcile_script(setup.shas["cioms_followup.pdf"])
     answer = await ask(setup, ScriptedModelClient(script), "Does this CIOMS match ADAE?")
     assert answer.verified
     onset = next(f for f in answer.facts_used if f["id"] == f"recon:{s}:onset_date")
@@ -465,6 +444,35 @@ def test_not_comparable_is_stated_despite_its_own_not() -> None:
     assert unstated_statuses("Action taken cannot be compared.", [item]) == ["not_comparable"]
 
 
+# Wordings the real model used instead of a status name. The prompt must never show them:
+# agent-v3 quoted "cannot be compared" as a counter-example and the model copied it into
+# reconciliation answers, which the checker then rejected (status_not_stated).
+STATUS_PARAPHRASES = ("cannot be compared", "can't be compared", "could not be compared")
+
+
+def test_prompt_never_shows_a_status_paraphrase() -> None:
+    from chatmed.agent.prompt import SYSTEM_PROMPT, retry_note
+
+    shown = (SYSTEM_PROMPT + retry_note("status_not_stated")).casefold()
+    assert not [p for p in STATUS_PARAPHRASES if p in shown]
+
+
+def test_prompt_names_exactly_the_row_id_prefixes_tools_return() -> None:
+    """agent-v5: the model cited a bare document id once; the prompt lists the real prefixes.
+    If a tool gains a new id kind, this fails until the prompt names it (and is bumped)."""
+    import inspect
+    import re
+
+    from chatmed.agent import tools
+    from chatmed.agent.prompt import SYSTEM_PROMPT
+
+    # Evidence row ids only: `_note_read(ctx, f"subject:...")` keys are tenant-read digests.
+    source = inspect.getsource(tools)
+    in_tools = set(re.findall(r'(?<!_note_read\(ctx, )f"([a-z]+):\{', source))
+    line = SYSTEM_PROMPT.split("they start with", 1)[1].split(")", 1)[0]
+    assert set(re.findall(r"([a-z]+):", line)) == in_tools
+
+
 def test_status_check_names() -> None:
     item = _item({"status": "undeterminable", "join_status": "not_attempted"})
     assert unstated_statuses("It is undeterminable; join not attempted.", [item]) == []
@@ -524,49 +532,6 @@ async def test_unmatched_subject_is_stated(recorded: FakeModelClient) -> None:
 
 
 # ---------------------------------------------------------------- D14: reconciliation is one unit
-
-
-async def test_citing_one_reconciliation_row_uses_the_whole_reconciliation(
-    recorded: FakeModelClient,
-) -> None:
-    """Option A: the real model cited varying subsets; facts_used must not depend on that."""
-    setup = await setup_session(recorded, ["cioms_initial.pdf"])
-    s = setup.shas["cioms_initial.pdf"][:12]
-    full = await ask(setup, ScriptedModelClient(reconcile_script(s)), "Match?")
-    setup2 = await setup_session(recorded, ["cioms_initial.pdf"])
-    script = [
-        tool_call("reconcile_case", {"doc_sha": s}),
-        final(
-            "Onset 2026-06-12 and seriousness match. Action taken and outcome are not comparable.",
-            [f"recon:{s}:onset_date"],
-        ),
-    ]
-    partial = await ask(setup2, ScriptedModelClient(script), "Match?")
-    assert partial.verified
-    assert partial.facts_used == full.facts_used
-    assert ids(partial) == [  # the model never queried subject_id: added by code (D14)
-        "adae:ACM-101-01001-004:2",
-        f"fact:{s}:subject_id:1",
-        f"recon:{s}:action_taken",
-        f"recon:{s}:onset_date",
-        f"recon:{s}:outcome",
-        f"recon:{s}:seriousness",
-    ]
-
-
-async def test_uncited_not_comparable_items_must_still_be_stated(
-    recorded: FakeModelClient,
-) -> None:
-    """AC4 by code: citing only onset still brings action/outcome (not_comparable) in."""
-    setup = await setup_session(recorded, ["cioms_initial.pdf"])
-    s = setup.shas["cioms_initial.pdf"][:12]
-    script = [
-        tool_call("reconcile_case", {"doc_sha": s}),
-        final("The onset date 2026-06-12 matches.", [f"recon:{s}:onset_date"]),
-        final("The onset date 2026-06-12 matches.", [f"recon:{s}:onset_date"]),
-    ]
-    answer = await ask(setup, ScriptedModelClient(script), "Match?")
-    assert (answer.verified, answer.reason) == (False, "status_not_stated")
 
 
 # ---------------------------------------------------------------- D6/D14: answer fingerprint
@@ -739,40 +704,17 @@ async def test_unmatched_subject_fact_is_not_added_to_the_unit(recorded: FakeMod
     """Only the *joined* subject_id fact is part of the reconciliation unit."""
     setup = await setup_session(recorded, ["cioms_initial.pdf"], tenant="globex")
     s = setup.shas["cioms_initial.pdf"][:12]
-    script = [
-        tool_call("reconcile_case", {"doc_sha": s}),
-        final("Not comparable: the subject is not joined.", [f"recon:{s}:onset_date"]),
-    ]
-    answer = await ask(setup, ScriptedModelClient(script), "Match?")
+    answer = await ask(setup, ScriptedModelClient(reconcile_script(s)), "Match?")
     assert answer.verified
     assert not any(i.startswith(("fact:", "adae:", "adsl:")) for i in ids(answer))
-
-
-async def test_a_reworded_status_is_rejected(recorded: FakeModelClient) -> None:
-    """Seen with the real model (agent-v1): "cannot be compared" for not_comparable."""
-    setup = await setup_session(recorded, ["cioms_initial.pdf"])
-    s = setup.shas["cioms_initial.pdf"][:12]
-    script = [
-        tool_call("reconcile_case", {"doc_sha": s}),
-        final(
-            "Onset 2026-06-12 and seriousness match. Action taken and outcome cannot be compared.",
-            [f"recon:{s}:onset_date"],
-        ),
-        final(
-            "Onset 2026-06-12 and seriousness match. Action taken and outcome are not comparable.",
-            [f"recon:{s}:onset_date"],
-        ),
-    ]
-    client = ScriptedModelClient(script)
-    answer = await ask(setup, client, "Match?")
-    assert answer.verified
-    assert "status_not_stated" in client.requests[2]["messages"][-1]["content"]
 
 
 def test_prompt_tells_the_model_statuses_are_checked_by_name() -> None:
     from chatmed.agent.prompt import SYSTEM_PROMPT
 
-    assert "exact name" in SYSTEM_PROMPT and "cannot be compared" in SYSTEM_PROMPT
+    # agent-v4: says names are checked word for word; no longer quotes the paraphrase
+    # (test_prompt_never_shows_a_status_paraphrase).
+    assert "status name itself" in SYSTEM_PROMPT and "word\n  for word" in SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------- AC2: question time limit

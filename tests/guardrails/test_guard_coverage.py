@@ -29,6 +29,7 @@ NOT_OUTPUT_DECIDING = {
     "chatmed.session.base": "storage interface",
     "chatmed.session.memory": "storage; every consumer sorts documents itself (by sha256)",
     "chatmed.tenant_db": "re-exports",
+    "chatmed.telemetry": "exports metadata-only logs and request spans; never changes an answer",
 }
 
 

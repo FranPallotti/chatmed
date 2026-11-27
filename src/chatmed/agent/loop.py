@@ -7,6 +7,8 @@ and a strict answer schema. What the model is shown lives in `chatmed.agent.prom
 The loop stops after `AGENT_MAX_ITERATIONS` model calls, or when the question's time limit
 (`AGENT_QUESTION_TIMEOUT_SECONDS`, over all model calls, retries and tools) runs out, and then
 returns the safe fallback (reason `max_iterations` or `deadline`).
+It also ends early, without another model call, as soon as a `reconcile_case` call succeeds:
+reconciliation answers are rendered by code (`answer.render_reconciliation`, D14).
 Logs carry only metadata (rule 2): event names, session id, tool names, counts and timings.
 """
 
@@ -26,7 +28,13 @@ import duckdb
 import openai
 
 from chatmed.agent import prompt
-from chatmed.agent.answer import Answer, AnswerRejected, fallback_answer, verify
+from chatmed.agent.answer import (
+    Answer,
+    AnswerRejected,
+    fallback_answer,
+    render_reconciliation,
+    verify,
+)
 from chatmed.agent.prompt import (
     ANSWER_SCHEMA,
     SYSTEM_PROMPT,
@@ -233,6 +241,16 @@ def _parse_answer(message: Any, finish_reason: str) -> dict[str, Any]:
     return parsed
 
 
+def _reconciled_doc(tool_name: str, result: dict[str, Any]) -> str | None:
+    """The document (sha prefix) a successful `reconcile_case` call reconciled, else None."""
+    if tool_name != "reconcile_case":
+        return None
+    for row in result.get("rows", []):
+        if str(row.get("id", "")).startswith("recon:"):
+            return str(row["id"]).split(":")[1]
+    return None  # an error code: it goes back to the model like any tool error
+
+
 async def _answer_loop(
     client: AsyncAzureOpenAI,
     session: Session,
@@ -244,7 +262,11 @@ async def _answer_loop(
     rng: random.Random,
 ) -> Answer | None:
     """Model calls and tool calls until a verified answer, the second rejection (fallback) or
-    `AGENT_MAX_ITERATIONS` (None). Runs inside the question's time limit (see run_agent)."""
+    `AGENT_MAX_ITERATIONS` (None). Runs inside the question's time limit (see run_agent).
+
+    Early exit: once a `reconcile_case` call succeeds, the answer is rendered by code from its
+    rows (`render_reconciliation`) and returned at once; the model is not called again (D14).
+    """
     policy = RetryPolicy.from_settings(settings)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -276,6 +298,13 @@ async def _answer_loop(
                 result = await _run_tool(
                     ctx, session.id, call.function.name, call.function.arguments
                 )
+                doc = _reconciled_doc(call.function.name, result)
+                if doc is not None:  # code writes the answer, no further model call (D14)
+                    log.info(
+                        "agent.reconciliation_rendered",
+                        extra={"session_id": session.id, "iteration": iteration},
+                    )
+                    return render_reconciliation(ctx, doc)
                 content = json.dumps(result, sort_keys=True, ensure_ascii=False)
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
             continue

@@ -8,4 +8,4 @@
 | 4 | Sample documents: digital or scanned? Typical size and count per session? | Data provider | Open | Synthetic fixtures; ≤5 docs, ≤30 pages |
 | 5 | Exact shape of the tenant field metadata? | Data provider | Open | `db/schema/tenant_schema.sql` + `db/seed/` |
 | 7 | May the sample CIOMS PDFs and SAS datasets be processed with Azure OpenAI (own subscription) and AI coding tools? | Data provider | Asked | No (D12): local parsing only; all external processing uses synthetic data |
-| 8 | Container RAM for the M5 deployment, and is a cap on concurrent OCR wanted? The worst case with default limits is ≈ 11 GB if 20 sessions upload scans at once (`architecture.md`, Session). | Project owner | Open | `MAX_SESSIONS=20`, `DUCKDB_MEMORY_LIMIT=128MB`, no OCR cap |
+| 8 | Container RAM for the M5 deployment, and is a cap on concurrent OCR wanted? | Project owner | Decided (M5a AC1) | 2 vCPU / 4 GiB, `OCR_MAX_CONCURRENCY=2`, `MAX_SESSIONS=8`, `DUCKDB_MEMORY_LIMIT=128MB` |

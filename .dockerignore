@@ -1,0 +1,20 @@
+# Allow-list: the build context holds only what the image needs (M5a AC2/AC3).
+# Everything else stays out, in particular samples/ (real data, D12), .env and db/.env.
+*
+!pyproject.toml
+!uv.lock
+!src/
+!tests/
+!fixtures/
+!scripts/
+
+# Never, even inside allowed folders.
+**/.env
+**/.env.*
+**/samples
+**/__pycache__
+**/*.pyc
+**/*.real.pdf
+**/*.cioms.pdf
+**/*.sas7bdat
+**/*.xpt

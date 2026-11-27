@@ -36,7 +36,10 @@ async def build_parser(settings: Settings) -> DocumentParser:
         ocr = DocIntelParser(make_docintel_client(settings.docintel_endpoint))
     else:
         tesseract = TesseractOcrParser(
-            dpi=settings.ocr_dpi, lang=settings.ocr_lang, cmd=settings.tesseract_cmd or None
+            dpi=settings.ocr_dpi,
+            lang=settings.ocr_lang,
+            cmd=settings.tesseract_cmd or None,
+            max_concurrency=settings.ocr_max_concurrency,
         )
         await tesseract.ensure_available()
         ocr = tesseract

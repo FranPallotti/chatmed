@@ -60,6 +60,15 @@ RULES_HASHES = {
     "rules-7": "9a28582b7b75f4d8cf53f1a64836d452b9ea024194dc224d774d691dd575a8e5",
     # rules-8 (M4 review, D15): a cancelled OCR call kills the Tesseract process.
     "rules-8": "ed95e502514a6cd93407a16c00aaf6260afb21d7a3d2ea31d023c5f40cfebae4",
+    # rules-9 (M5a AC1, D16): OCR_MAX_CONCURRENCY semaphore per OCR page; same text and order.
+    "rules-9": "0e440c6f880c490445d8bcb6923bddad9ffe6a4e6ab4f8d88313a3e0637c0b29",
+    # rules-10 (M5a): reconcile_case returns a code-written `statement` of its items.
+    "rules-10": "f4f92c38950bb2d5603864ae19430c6e7c24b71124c63790274199a16d013a6e",
+    # rules-11 (M5a): reconciliation answers rendered by code (answer.render_reconciliation),
+    # no second model call; rules-10's `statement` removed from the tool result.
+    "rules-11": "5395e887f0193173fdcdbb616c96b2542dd85a53ad013d6f8470262264b7c52f",
+    # rules-12 (M5a review): rendered reconciliation ends with a scope line.
+    "rules-12": "6af19eb85ef92024f7cc91e441404a487f6d985613f853cc9bd6436ca0d725c5",
 }
 
 

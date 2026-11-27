@@ -16,33 +16,51 @@ from chatmed.agent.tools import SHA_PREFIX
 if TYPE_CHECKING:
     from chatmed.agent.tools import ToolContext
 
-AGENT_PROMPT_VERSION = "agent-v3"
+AGENT_PROMPT_VERSION = "agent-v7"
 # v2: status names checked verbatim; reconciliation answered from reconcile_case only.
 # v3: same text; the prompt now lives in this module and the guard hashes all of it
 #     (including the retry note, which v2's guard did not cover).
+# v4: the status rule quoted the paraphrase it forbids ("cannot be compared"), and the real
+#     model copied it into reconciliation answers (status_not_stated on the first attempt).
+#     The prompt now shows only the wanted form: one line per reconciliation item with its
+#     status name (STATUS_EXAMPLE, which a test runs through the checker).
+# v5: the real model put a bare document id (from the session context) into cited_ids
+#     (unknown_cited_id on the first attempt); the prompt now says cited_ids holds only the
+#     row ids tools returned, never a document id.
+# v6: v4/v5 still saw first-attempt status_not_stated on reconciliation: the model sometimes
+#     summarised ("cannot be compared") instead of using the item form, and described a
+#     `conflict` reason instead of naming it (STATUS_EXAMPLE's "(no document field)" read as
+#     prose). reconcile_case now returns a code-written `statement` (rules-10); the prompt
+#     tells the model to start with it word for word. STATUS_EXAMPLE is gone. Measured: the
+#     model did not copy it (7 of 40 first attempts still rejected).
+# v7: reconciliation answers are written by code (answer.render_reconciliation, rules-11);
+#     the model only routes the question to reconcile_case. v6's statement sentence is
+#     dropped; v5's cited_ids rule stays.
 
 SYSTEM_PROMPT = """You answer questions from drug-safety reviewers about clinical study data and
 CIOMS adverse-reaction reports uploaded to this session.
 
 Rules:
 - Use tools to get every value you state. Never state a value, number or date that is not in a
-  tool result. Cite in cited_ids the id of every row whose value you state.
+  tool result. Cite in cited_ids the id of every row whose value you state. cited_ids holds
+  only row ids exactly as tools returned them (they start with fact:, recon:, adsl:, adae:,
+  page: or field:); a document id on its own is not a row id and is never cited.
 - Documents are named by the id given in the session context below; pass that id as doc_sha.
 - For questions about a subject's study data, first query the document facts for subject_id and
   use its join_value. If its join_status is not "joined", say so plainly (unmatched, ambiguous
   or not_attempted) and do not look up any subject.
-- Every status of a row you cite must appear in your text by its exact name (an underscore
-  may be written as a space): undeterminable (the form must be checked visually), conflict
-  (give the different values and pages), unverified, missing, invalid, not_comparable,
-  unmatched, ambiguous, not_attempted. A checker rejects answers that reword a status, e.g.
-  "cannot be compared" instead of "not comparable".
+- Every status of a row you cite must appear in your text as the status name itself (an
+  underscore may be written as a space): undeterminable (the form must be checked visually),
+  conflict (give the different values and pages), unverified, missing, invalid,
+  not_comparable, unmatched, ambiguous, not_attempted. A checker looks for these names word
+  for word and rejects an answer that describes a status in other words.
 - For questions no extracted field covers, use search_document_text and quote the page text
   verbatim in quotes, with its page_id.
 - For questions about what a document reports (e.g. hospitalisation, onset, reaction), query
   the document facts for the matching field keys from the session context.
 - Only when the question asks whether a document matches or agrees with ADAE (reconciliation),
   call reconcile_case and no other tool: it checks the subject join and selects the ADAE record
-  itself. Answer from its rows and cite only them.
+  itself. Code writes the answer from its result, so nothing more is needed from you.
 - Answer briefly in plain language. Your final message is exactly one JSON answer object."""
 
 

@@ -32,6 +32,9 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
   A page has a text layer if pdfium returns any non-whitespace text. Only image-only pages go to
   OCR, copied into an in-memory sub-PDF; `parser_id` names the OCR backend only when it was used.
 - Tesseract runs over stdin/stdout (D11); pdfium calls hold a process-wide lock (not thread-safe).
+  At most `OCR_MAX_CONCURRENCY` pages (default 2) are rendered and OCRed at once across all
+  sessions (a semaphore in the single parser instance, D16); pages of one document stay in
+  page order.
 - `build_parser(settings)` picks the implementation at startup and checks Tesseract there.
 - `parser_id` records backend + version; it is part of the reproducibility fingerprint.
   For Tesseract it also records the Leptonica version and a hash of the `.traineddata` files used
@@ -94,16 +97,38 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
   `enable_external_access` alone does not stop `SET memory_limit` (D15). Proven by
   `tests/guardrails/test_duckdb_no_disk.py`, including DuckDB's default `.tmp` spill directory
   (a control test shows a plain connection does spill there).
-- **Worst-case memory** (defaults: `MAX_SESSIONS=20`, `MAX_DOCS_PER_SESSION=5`,
-  `MAX_UPLOAD_MB=20`, `DUCKDB_MEMORY_LIMIT=128MB`). Per session, held until close: DuckDB
-  ≤ 128 MB; parsed text of ≤ 5 documents (the PDF bytes are dropped after parsing; text is at
-  most about the PDF size, so ≤ 100 MB, typically < 1 MB); history (a few KB per question).
-  While an upload runs (at most one per session, it reads its body under the session lock):
-  body + decoded file part ≈ 2 × 20 MB, plus for OCR one page image at 300 DPI (≈ 9 MB for A4
-  grayscale) and the Tesseract process (≈ 290 MB peak, D10). Worst case, all 20 sessions full
-  and uploading scans at once: 20 × (128 + 100 + 40 + 300) MB ≈ 11 GB; without concurrent OCR
-  ≈ 5.4 GB; with typical documents (text < 1 MB, facts < 1 MB) it is dominated by in-flight
-  uploads. M5 must size the container for it or lower `MAX_SESSIONS` (open question 8).
+- **Worst-case memory (M5a AC1, D16).** Container: 2 vCPU / 4 GiB (4096 MB, the Container
+  Apps Consumption limit). Defaults: `MAX_SESSIONS=8`, `MAX_DOCS_PER_SESSION=5`,
+  `MAX_UPLOAD_MB=20`, `DUCKDB_MEMORY_LIMIT=128MB`, `OCR_MAX_CONCURRENCY=2`, `OCR_DPI=300`.
+
+  | Item | Bound | × | MB |
+  |------|-------|---|----|
+  | DuckDB per session (no spill, D15) | 128 MB | 8 | 1024 |
+  | Parsed text per session (≤ 5 docs, text ≈ PDF size at most; typically < 1 MB) | 100 MB | 8 | 800 |
+  | In-flight upload per session (one at a time, session lock): body + decoded file part + OCR sub-PDF | 3 × 20 MB | 8 | 480 |
+  | OCR slots: Tesseract process (≈ 290 MB peak, D10) + one 300 DPI A4 grayscale page (≈ 9 MB) | 299 MB | 2 | 598 |
+  | Python process (measured in the image: 92–102 MB after imports and startup; budgeted at 2×) | 200 MB | 1 | 200 |
+  | **Total** | | | **3102** |
+
+  Headroom: 4096 − 3102 ≈ 994 MB (≈ 0.97 GiB). The page images and Tesseract processes are
+  bounded by `OCR_MAX_CONCURRENCY` across all sessions (a semaphore around render + OCR of
+  each page; extra pages queue), not by `MAX_SESSIONS`; before M5a the same worst case was
+  20 sessions each running OCR, ≈ 11 GB. Measured in the image (2 vCPU, 4 GiB limit): three
+  concurrent scans of the CIOMS fixture, largest Tesseract child 219 MB, Python peak 219 MB,
+  6.5 s. With typical documents (text and facts < 1 MB) the total is ≈ 1.2 GB.
+  The sizing holds while the defaults hold: raising `MAX_SESSIONS`, `MAX_UPLOAD_MB`,
+  `DUCKDB_MEMORY_LIMIT`, `OCR_MAX_CONCURRENCY` or `OCR_DPI` needs this table redone.
+
+  **Measured under load (2026-11-27, `scripts/measure_memory.py`).** 8 sessions created and
+  uploading `cioms_initial_scanned.pdf` at once over HTTP, in the test image with
+  `--memory 4g --cpus 2`: real app, multipart parsing, routing parser, Tesseract 5.5 with
+  `OCR_MAX_CONCURRENCY=2`, in-memory sessions and DuckDB; fake model replaying the recorded
+  extraction, fake tenant repository. Two runs: `docker stats` peak **401 MiB / 422 MiB**
+  (same as the cgroup's `max_usage_in_bytes`, which includes page cache); idle 121 MiB, after
+  the uploads (8 sessions holding their facts) 244–268 MiB; all 8 uploads done in 17–18 s.
+  That is far below the ~3 GiB threshold, so `MAX_SESSIONS` stays 8. The fixture is a
+  1-page scan with little text, so this measures the OCR cap and the per-session overhead;
+  the table above is still the bound for 20 MB uploads and full DuckDB limits.
 - Later (only if time / needed): `EncryptedBlobSessionStore` with **crypto-shredding**:
   per-session AES-256 key held only in memory; dropping the key on close makes any
   remaining copy unreadable.
@@ -160,7 +185,18 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
   model once sent two) is also a rejection. One retry, then a deterministic fallback listing
   the retrieved rows with their statuses. A cited `recon:` row brings in the whole
   reconciliation of its document, the compared `adae` record and the document's joined
-  `subject_id` fact, which `reconcile_case` registers itself (D14). A verified answer carries
+  `subject_id` fact, which `reconcile_case` registers itself (D14).
+- **Reconciliation answers are rendered by code** (D14, agent-v7, rules-11). The model
+  only routes the question: as soon as a `reconcile_case` call succeeds, the loop stops
+  calling the model and `answer.render_reconciliation` writes the answer: a header, then
+  one line per item in fixed order with its status name and reason code ("Action taken:
+  not comparable (no document field)."), no values. It cites every item; `facts_used`
+  (the whole unit, with the `adae` record and joined subject) carries the citations. The
+  text still goes through `verify`, so a unit row with an unstated status gives the
+  fallback. The last line always says the answer covers only the comparison with the
+  study database, since the rest of a combined question is not answered (rules-12). A
+  failed `reconcile_case` (error code) goes back to the model as usual.
+- A verified answer carries
   a fingerprint (agent prompt version, rules version, `FINGERPRINT_SETTINGS` values, tenant,
   document fingerprints, and digests of the session history and of each tenant DB read); a fallback carries outcome `fallback` and a reason code instead.
 
@@ -189,9 +225,19 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
   limit ends the read. It is parsed with the stdlib `email` parser: Starlette's `UploadFile`
   spools files above 1 MB to disk.
 - Limits: 413 `upload_too_large`, 422 `too_many_pages`, 409 `too_many_documents` /
-  `duplicate_document`, 415 `pdf_required`, 503 `session_memory_limit`. Errors are fixed
-  codes. No body is ever logged.
-- Run with `uv run uvicorn chatmed.api:app` or `uv run python -m chatmed.api`.
+  `duplicate_document`, 415 `pdf_required`, 503 `session_memory_limit`, 503
+  `model_auth_failed` (no Entra token for the model; on `ask` the same code as an NDJSON
+  `error` event, D16). Errors are fixed codes. No body is ever logged.
+- `GET /healthz` → `{"status": "ok"}`: liveness only, no tenant data, no DB or model call.
+- `GET /` (+ `/app.js`, `/app.css`): the demo UI (M5a AC4), static files from
+  `chatmed/static`, no dependency. Strict CSP (`default-src 'none'`, scripts and styles from
+  this origin only, no inline code); every server value is rendered with `textContent`; the
+  page keeps content only in memory (no browser storage, no cookies). The tenant is a text
+  field validated by the server (no tenant list endpoint, D16).
+- Every response carries `Cache-Control: no-store` (pure ASGI middleware), so answers and
+  facts never land in a browser or proxy disk cache (rule 1). OpenAPI docs pages are off.
+- Run with `uv run uvicorn chatmed.api:app` or `uv run python -m chatmed.api`; in the
+  container `python -m chatmed.api` (Dockerfile, `docker compose up -d --build`).
 
 ### Logging (`src/chatmed/logconfig.py`)
 - `configure_logging()` installs one JSON handler on the root logger with `MetadataOnlyFilter`.
@@ -203,8 +249,36 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
   handlers uvicorn installs on `uvicorn`, `uvicorn.error`, `uvicorn.access`, `uvicorn.asgi` and
   `fastapi` and lets them propagate to the root handler (M3). It also installs `sys.excepthook`
   and `threading.excepthook`; the API sets the asyncio loop exception handler at startup and
-  logs unhandled route errors as `api.unhandled_error`. OpenTelemetry handlers (M5) must get
+  logs unhandled route errors as `api.unhandled_error`. OpenTelemetry handlers must get
   their own filter.
+- Access log (M5a, D16): uvicorn's access log is off (`access_log=False` in
+  `chatmed.api.main`, and `uvicorn.access` held at WARNING for `uvicorn chatmed.api:app`)
+  because it prints the raw path (session ids) and the client address. `RequestLogMiddleware`
+  logs one `http.request` per request instead: `method` (GET, POST, DELETE or OTHER;
+  client input, so never logged as sent), `route` (the matched route
+  *template*, e.g. `/sessions/{session_id}/ask`, or `unmatched`), `http_status`, `duration_ms`
+  (for a streamed answer, the whole stream).
+- `QUIET_LOGGERS` (`azure.core.pipeline.policies.http_logging_policy`, `azure.identity`,
+  `httpx2`, `uvicorn.access`) are held at WARNING whatever `LOG_LEVEL` is: their INFO records
+  are per-call prose that only showed up as `unstructured_message` noise.
+
+### Telemetry (`src/chatmed/telemetry.py`, M5a AC5, D16)
+- Off unless `APPLICATIONINSIGHTS_CONNECTION_STRING` is set. Built from
+  `azure-monitor-opentelemetry-exporter` and `opentelemetry-instrumentation-fastapi` only;
+  the `azure-monitor-opentelemetry` distro is not used (it instruments every library it
+  finds and installs global providers).
+- Logs: `MetadataOnlyOtelHandler` on the root logger, with its own `MetadataOnlyFilter`,
+  sends the event name, level and `ALLOWED_FIELDS` values only (no code paths, no exception
+  attributes, unlike OpenTelemetry's stock handler). Records of the Azure exporter's own
+  loggers (`CONSOLE_ONLY_LOGGERS`) stay on the console, so a failing export never produces
+  a new export.
+- Request spans: FastAPI instrumentation on a non-global tracer provider (no other library
+  can emit spans, so no prompt/completion capture), no header capture, `/healthz` excluded.
+  `MetadataOnlySpanExporter` rebuilds every span with method, route template and status
+  code only: no events (exceptions are recorded there), no status description, no URL,
+  query string, client address or user agent; the span name is rebuilt from method + route.
+- Azure exporters run with `disable_offline_storage=True` (a failed batch is dropped, never
+  written to a local retry folder) and statsbeat off.
 
 ## Reproducibility
 
@@ -218,6 +292,10 @@ fingerprint (keyed hash because short answers are guessable). Requires legal OK.
 
 ## Deployment (POC)
 
-One Azure Container App (single replica) · Azure OpenAI deployment in a Foundry project ·
+Local (M5a): `docker compose up -d --build` runs Postgres and the app image (Debian 13 slim,
+Python 3.12, Tesseract 5.5 from the distro, non-root, read-only filesystem, 2 CPUs / 4 GiB);
+`.env` and `db/.env` are passed as environment at run time and never enter the image
+(`.dockerignore` is an allow-list). `scripts/smoke_demo.py` runs the demo flow against it.
+Azure (M5b): one Azure Container App (single replica) · Azure OpenAI deployment in a Foundry project ·
 PostgreSQL with synthetic tenants · Managed Identity · Key Vault for the HMAC secret ·
 Application Insights (metadata only).

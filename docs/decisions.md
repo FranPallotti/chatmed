@@ -70,7 +70,7 @@ Format: context → options → decision → why → consequences. Add new entri
     order), `chatmed.agent.loop` (one retry, iteration and time limits, answer fingerprint),
     `chatmed.tenant_db.repository` (which tenant rows and columns the tools see),
     `chatmed.parsing.base`, `.pdfium`, `.tesseract_ocr`, `.docintel`, `.routing` (page text).
-  - **Agent prompt version** (`AGENT_PROMPT_VERSION`, `agent-v3`;
+  - **Agent prompt version** (`AGENT_PROMPT_VERSION`, `agent-v7`;
     `test_agent_prompt_version.py`): `chatmed.agent.prompt`, which holds everything the agent
     model is shown (system prompt, session context, retry note, tool and answer schemas).
     The extraction prompt stays in `chatmed.extraction`, so it is under the rules guard (and
@@ -353,6 +353,58 @@ Approved by the project owner with the M3 plan.
   paraphrases (that would weaken AC4); `agent-v2` tells the model the names are checked
   verbatim, with that example. Reconciliation questions are answered from `reconcile_case`
   only. AC9 also requires first-attempt verification.
+- **Reconciliation wording, measured (M5a pre-merge, `agent-v4`..`agent-v6`,
+  `rules-10`).** The container smoke test still saw first-attempt `status_not_stated` on
+  reconciliation. Measured with the real model (10 scanned sessions x 3 questions, 5 initial
+  and 5 follow-up reconciliation sessions, synthetic fixtures; rejected texts printed to the
+  terminal only):
+  - `agent-v3`: 2 of 33 first attempts rejected. Root cause: the status rule quoted the
+    paraphrase it forbids ("cannot be compared"), and the model copied it. `agent-v4` removed
+    it and showed the per-item form instead (`STATUS_EXAMPLE`): 0 `status_not_stated`, but
+    one `unknown_cited_id` (a bare document id in `cited_ids`).
+  - `agent-v5` (cited_ids holds only row ids): 0 `unknown_cited_id`, but 6 of 40 first
+    attempts `status_not_stated`. Initial report: the model sometimes summarised ("action
+    taken and outcome cannot be compared") instead of using the item form. Follow-up: the
+    onset item is `not_comparable` with reason `conflict`, and the model described the two
+    dates instead of naming `conflict` (the example's "(no document field)" reads as prose,
+    not as a reason code). So a prompt example does not reliably control the model's wording.
+  - `agent-v6` / `rules-10`: `reconcile_case` returns a `statement` built by code from its
+    rows (item, status name, reason code; no values), and the prompt tells the model to
+    start the answer with it word for word. Measured: 7 of 40 first attempts
+    `status_not_stated`, all "cannot be compared" on reconciliation; the model does not
+    copy the statement (it reaches the model, after the rows in the sorted tool JSON).
+  - Conclusion: the prompt does not control the model's wording reliably at temperature 0.
+    Every rejected answer was verified on the retry except one fallback in the v5 run.
+- **Decision: reconciliation answers are rendered entirely by code (`agent-v7`,
+  `rules-11`).** Options were code-rendered text, a status field per item in the answer
+  schema, or accepting a fixed paraphrase list in the check (loosens AC4). Decided (reviewer):
+  the answer is rendered by code from the `reconcile_case` result: one line per item with
+  its status name and reason code, plus citations (`facts_used`, the whole reconciliation
+  unit). No second model call and no model prose: the model only routes the question to the
+  tool. `answer.render_reconciliation` writes it; the loop returns it as soon as a
+  `reconcile_case` call succeeds (an error code still goes back to the model).
+  - Why: statuses are facts (rule 4); the model's wording of them was the only source of
+    first-attempt rejections, and the text no longer depends on the model at all.
+  - The rendered text still goes through `verify` (same checker, unchanged): a unit row
+    whose status the text does not state yields the fallback, never an unchecked answer.
+  - `agent-v7` drops v6's statement sentence and keeps v5's cited_ids rule; `rules-11`
+    removes v6's `statement` from the tool result and adds the renderer. Versions never go
+    backwards. `agent-v6` and `rules-10` were never released but keep their recorded hashes:
+    they were measured with the real model and are cited above, so the hash is what ties
+    those measurements to the exact text, and a number reused for different text would make
+    the record ambiguous.
+  - Consequences: reconciliation answers carry no values in the text (the rows in
+    `facts_used` do) and cannot answer a narrower question ("does the onset match?") in
+    prose: they always list all four items. A question that also asks something else gets
+    only the reconciliation; so that this is never silent, every rendered answer ends with
+    a code-written line saying it covers only the comparison with the study database
+    (`RECONCILIATION_SCOPE`, `rules-12`, review follow-up). The match/mismatch words now come from code, which closes the
+    gap that the checker never verified them.
+  - Tests: `tests/test_reconciliation_render.py` (each status rendered; demo documents;
+    40/40 first-attempt runs per document with the fake model, one model call each; a
+    combined question gets the reconciliation and the scope line, nothing else);
+    opt-in `tests/test_agent_azure.py::test_reconciliation_verifies_on_the_first_attempt`
+    (40 real-model runs).
 - **Answer fingerprint and outcome (revised after the M3 reviews):** the fingerprint is the
   sha256 of `AGENT_PROMPT_VERSION`, `RULES_VERSION`, every `FINGERPRINT_SETTINGS` value
   (`name=value`, sorted by name), the session's tenant id, the sorted extraction
@@ -445,3 +497,82 @@ Approved by the project owner with the M4 plan.
 - **Lifecycle events** (metadata only): `session.created` (session, tenant),
   `session.closed` (session, tenant, `reason`), `session.rejected` (tenant, `status`
   `capacity`), `session.swept` and `session.shutdown` (`session_count`).
+
+## D16. Container, OCR cap, local model auth, UI and telemetry (M5a)
+Approved by the project owner with the M5a plan.
+- **Sizing (closes open question 8).** Target 2 vCPU / 4 GiB (Container Apps Consumption
+  limit). `MAX_SESSIONS` default 20 → 8; new operational setting `OCR_MAX_CONCURRENCY`
+  (default 2). Worst case 3102 MB of 4096 MB (table in `architecture.md`).
+- **OCR cap per page, inside `TesseractOcrParser` (`rules-9`).** A semaphore on the single
+  parser instance covers rendering one page and running Tesseract on it, so at most 2 page
+  images and 2 processes exist at once across all sessions; other pages queue. Per page rather
+  than per document so one 30-page scan cannot hold a slot for a minute while other sessions
+  wait. The module is under the rules guard, so the version was bumped although page text
+  and order do not change (tested: concurrent scans give the same pages in page order as a
+  run alone). Alternative rejected: a wrapper module outside the guard, per document.
+- **Model auth in the local container.** `DefaultAzureCredential` in the container cannot use
+  the host's `az login`, and the Azure CLI would add ~1 GB to the image. Locally the container
+  uses a service principal with only `Cognitive Services OpenAI User` on the Foundry resource
+  and a client secret expiring in about 2 weeks, created by the project owner; its
+  `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` live in the gitignored `.env`
+  and reach the container as environment at run time (EnvironmentCredential), never in code
+  or the image. In Azure (M5b) the managed identity replaces it. The SP is deleted in the
+  cleanup (`docs/deploy.md`).
+- **Image.** `python:3.12-slim-trixie` (Tesseract 5.5.0, Leptonica 1.84.1 from Debian).
+  Multi-stage: a `builder` stage installs the locked dependencies with uv pinned by image tag
+  (`uv sync --frozen --no-dev --no-editable`, bytecode compiled, no uv cache); the `runtime`
+  stage is the slim image plus `tesseract-ocr tesseract-ocr-eng` (`--no-install-recommends`,
+  apt lists removed) and only the copied venv: no uv, no source tree, no dev dependencies.
+  Non-root uid 10001, explicit `TESSDATA_PREFIX`. `runtime` is the last stage (the default
+  target) and compose names it: before, the default target was the `test` stage, so the
+  image compose ran held dev dependencies and tests (932 MB). Now 424 MB: Debian + Python
+  ≈ 120 MB, Tesseract and its libraries 101 MB, venv 204 MB (DuckDB 66, openai 29, uvloop 16,
+  cryptography 16, psycopg 10, pypdfium2 9, aiohttp 9, azure 8; 28 MB of it compiled
+  bytecode, kept because the read-only filesystem cannot cache it at run time).
+  A `test` stage (`docker build --target test`) runs the OCR/parser tests inside the image;
+  tests that read repository files kept out of the build context are skipped there through
+  one list, `HOST_ONLY_TESTS` in `tests/conftest.py` (checked by
+  `test_host_only_list_is_current`).
+  `.dockerignore` is an allow-list (pyproject, lock, src, tests, fixtures, scripts), so
+  `samples/` and every `.env` stay out of the build context. Compose runs the app with a
+  read-only filesystem, no volumes, all capabilities dropped and the 2 CPU / 4 GiB limits.
+- **UI.** Static HTML/JS/CSS in `chatmed/static`, served by FastAPI (no new dependency). The
+  tenant is a free text field validated by the server (D13a/D14); there is no endpoint
+  listing tenants, and tenant names appear only in `docs/demo.md`. Strict CSP, `textContent`
+  only, nothing in browser storage. Every API response is `Cache-Control: no-store`.
+- **Telemetry (amends M5a AC5).** Not the `azure-monitor-opentelemetry` distro: its
+  `configure_azure_monitor()` enables every instrumentation it ships with global providers,
+  and the FastAPI instrumentation records exception messages (span events, status
+  description) and the raw URL. Instead only `azure-monitor-opentelemetry-exporter`,
+  `opentelemetry-sdk` and `opentelemetry-instrumentation-fastapi`, wired by
+  `chatmed.telemetry`: logs through a handler with its own metadata filter that sends only
+  allow-listed fields; request spans on a non-global provider, rebuilt by an allow-list
+  exporter (method, route template, status code). Offline storage and statsbeat are off.
+  **Beta dependency:** `azure-monitor-opentelemetry-exporter` is only published as a beta
+  (`1.0.0b59`); the exact version is pinned by `uv.lock` and only changes with a deliberate
+  lock update. Re-evaluate when it reaches GA (1.0.0): move to the GA release, re-run
+  `tests/test_telemetry.py`, and check its release notes for new default behaviour (offline
+  storage, statsbeat, attribute mapping).
+- **Model auth failures.** When no Entra token can be obtained for the model
+  (`azure.core.exceptions.ClientAuthenticationError`, e.g. the local SP secret expired or the
+  credential chain finds nothing), an upload ends with 503 `model_auth_failed` and a question
+  with the NDJSON `error` code `model_auth_failed`, mapped in `chatmed.pipeline` (not a rules
+  module). Logged as `pipeline.model_auth_failed` with session, tenant and the error type only;
+  the SDK message is never logged. The session stays open. A 401/403 returned by Azure OpenAI
+  itself (token valid but no role) is still classified inside extraction as `extraction_failed`
+  (502) or `model_rejected`: telling those apart needs a change in `chatmed.extraction` /
+  `chatmed.agent.loop` and a rules bump, left for when it is needed.
+- **Request log (pre-merge review).** uvicorn's access log is replaced by our own
+  `http.request` event (method, route template, status, duration_ms): the raw path carries
+  the session id, which is a bearer capability for the session's content, and the client
+  address is not needed. Unmatched paths are logged as `unmatched`, never with the path.
+  The method is logged from a fixed list (GET, POST, DELETE, else OTHER): it is client input.
+  `azure.core.pipeline.policies.http_logging_policy`, `azure.identity` and `httpx2` are held
+  at WARNING (`logconfig.QUIET_LOGGERS`); they logged per-request prose at INFO.
+- **Exporter logs stay on the console (review follow-up).** Records of
+  `azure.monitor.opentelemetry.exporter` loggers are never sent to the telemetry handler
+  (`telemetry.CONSOLE_ONLY_LOGGERS`): sent through the exporter they describe, a failing
+  export would produce records to export. Tested with a failing exporter (one export only).
+- **check.py:** pytest runs with `.env` and `db/.env` loaded when present (the shell wins), so
+  the tenant DB tests run instead of skipping, and skips are printed by reason at the end.
+  `tests/conftest.py` removes `APPLICATIONINSIGHTS_CONNECTION_STRING` so tests never export.

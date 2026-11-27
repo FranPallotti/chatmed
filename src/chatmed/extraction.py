@@ -59,7 +59,15 @@ PROMPT_VERSION = "extract-v2"  # v2 (D13): OCR noise, interleaved columns, check
 #          instead of reaching the model as tool_failed (M4 AC4, D15)
 # rules-8: a cancelled OCR call (session closed mid-upload) kills the Tesseract process
 #          instead of leaving it running with the page image (M4 AC2, D15)
-RULES_VERSION = "rules-8"
+# rules-9: OCR_MAX_CONCURRENCY semaphore around each OCR page (M5a AC1, D16); page text and
+#          order unchanged, bumped because the module is hashed
+# rules-10: reconcile_case also returns `statement`, the items with their status names and
+#           reason codes written by code, for the answer to start with (D14, M5a)
+# rules-11: reconciliation answers rendered by code (answer.render_reconciliation), no
+#           second model call; rules-10's `statement` removed from the tool result (D14)
+# rules-12: rendered reconciliation ends with RECONCILIATION_SCOPE (covers only the
+#           comparison); loop docstrings name the early exit (D14)
+RULES_VERSION = "rules-12"
 
 
 class ExtractionError(RuntimeError):

@@ -145,12 +145,59 @@ session lifecycle trustworthy and turns on the guardrails that prove the "no sto
   was wiped. On app shutdown every open session is closed.
 
 ## M5 — Deployment and demo
-- AC1 Dockerfile (non-root, slim), runs Uvicorn; image builds locally.
-- AC2 Infra as code (Bicep or Terraform) for Container App, ACR, Key Vault, App Insights,
-  PostgreSQL; Managed Identity with least-privilege roles.
-- AC3 Seed script for two synthetic tenants with different field metadata.
-- AC4 Minimal UI (Streamlit or a static page) for upload / ask / close.
-- AC5 `docs/demo.md`: demo script, including showing that a second session gives the same answer.
+Split in two so a working demo exists even if the cloud deploy hits problems: **M5a** runs the full
+stack locally in containers; **M5b** deploys it to Azure.
+
+### M5a — Container, UI, telemetry (local)
+- AC1 Memory sizing (closes open question 8). Target container: 2 vCPU / 4 GiB (the Azure Container
+  Apps limit in a Consumption-only environment). Add `OCR_MAX_CONCURRENCY` (operational, default 2):
+  a semaphore around Tesseract; extra scans queue. Set `MAX_SESSIONS=8`. Recompute the worst case
+  in `architecture.md`; it must fit 4 GiB with ≈1 GiB headroom, otherwise lower `MAX_SESSIONS`.
+  Test: with concurrency 2, a third concurrent scan waits instead of starting a third process.
+- AC2 Dockerfile: Python 3.12 slim, `uv sync --frozen --no-dev`, `tesseract-ocr` + `tesseract-ocr-eng`
+  from the distro, non-root user, Uvicorn with our log config (`log_config=None`), a `/healthz` route
+  with no tenant data. The OCR tests pass inside the image (Linux tessdata discovery from M1b).
+- AC3 `docker compose up` runs app + Postgres together; `.env`/`db/.env` passed as env, never baked
+  into the image. A smoke script runs the demo flow against the running container.
+- AC4 Minimal UI: one static HTML/JS page served by FastAPI (no new dependency, no Streamlit, which
+  would add server state and upload handling outside our control): pick tenant, upload PDF, ask,
+  see progress events, the verified answer with `facts_used` and citations, statuses
+  (`undeterminable`, `conflict`, `not_comparable`…) visibly marked, and a Close session button.
+- AC5 Telemetry: Application Insights via `azure-monitor-opentelemetry-exporter` and
+  `opentelemetry-instrumentation-fastapi` only (not the `azure-monitor-opentelemetry` distro,
+  D16), enabled only when `APPLICATIONINSIGHTS_CONNECTION_STRING` is set. The metadata-only filter
+  applies to the exporter too (test: a fake exporter receives only whitelisted fields); no
+  request/response body capture; no prompt/completion capture by any instrumentation; an
+  exception containing document text never reaches the span exporter (events, status
+  description, URL).
+
+### M5b — Azure deployment
+- AC6 Infra as code (Bicep) in `infra/`: Azure Container Registry; Log Analytics + App Insights;
+  Container Apps environment (Consumption-only) and the app with **min = max = 1 replica** (sessions
+  are in memory, D5), 2 vCPU / 4 GiB; a user-assigned managed identity with only `AcrPull` and
+  `Cognitive Services OpenAI User` on the existing Foundry resource; Key Vault for the per-tenant
+  reader passwords; Azure Database for PostgreSQL Flexible Server (smallest Burstable tier).
+  Parameters for names; nothing secret in the templates.
+- AC7 Database in Azure: the same schema and seeds (`db/`) applied by a script run from the
+  developer's machine; per-tenant reader roles exactly as locally. Passwords live in Key Vault and
+  reach the app as Container Apps secrets via the managed identity. Record in a new decision why
+  this POC uses passwords from Key Vault instead of Entra auth per tenant, and the production path.
+- AC8 Access: the public endpoint is restricted (Container Apps ingress IP allow-list, HTTPS only),
+  so nobody else can upload files or spend model tokens. The tenant still comes from the request
+  (D14); the Entra token mapping stays documented as the production step.
+- AC9 `docs/deploy.md`: deploy, update and **delete** (`az group delete`) in a few commands, the
+  budget alert, and how to check that the app's logs contain only metadata.
+
+### M5c — Demo and wrap-up
+- AC10 `docs/demo.md`, a 10-minute script on synthetic data: create an acme session → upload the
+  scanned CIOMS → ask the three demo questions (arm, hospitalised, reconciliation) → show
+  `undeterminable` checkboxes and citations → close → second session, same questions, same
+  `facts_used` and fingerprint → show the logs (lifecycle events, no content) → globex session to
+  show different field metadata and tenant isolation.
+- AC11 README rewrite for a reviewer: what it is, the three constraints and how each is met, run
+  locally in five commands, architecture diagram, decision index, known limitations and what
+  changes for production (Entra auth per tenant, DataZone deployment, crypto-shredding store,
+  checkbox reading, real-sample clearance).
 
 ## Stretch (only if time)
 - Restricted SQL tool (was M4 AC6): SELECT-only, allow-list, tenant filter, limit, timeout,

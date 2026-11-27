@@ -16,6 +16,9 @@ dependencies = [
     "azure-ai-documentintelligence>=1.0.0",  # optional OCR backend (D1, M1 AC5)
     "psycopg[binary]>=3.2",
     "aiohttp>=3.9",  # required by azure.identity.aio (async Entra ID auth)
+    "azure-monitor-opentelemetry-exporter>=1.0.0b59",  # App Insights, metadata only (M5a AC5, D16)
+    "opentelemetry-instrumentation-fastapi>=0.66b2",  # request spans; not the distro (D16)
+    "opentelemetry-sdk>=1.45.2",  # providers + in-memory exporters for the tests
 ]
 
 [dependency-groups]

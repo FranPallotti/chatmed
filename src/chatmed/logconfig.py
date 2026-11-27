@@ -56,11 +56,23 @@ ALLOWED_FIELDS: frozenset[str] = frozenset(
         "output_chars",  # length of a rejected model answer, never the answer itself
         "reason",  # fixed codes only: why a session closed (client | ttl | shutdown)
         "session_count",  # how many sessions a sweep or shutdown closed
+        "method",  # HTTP method of an `http.request` event
+        "route",  # route *template* of an `http.request` event (never the raw path) or unmatched
     }
 )
 # Loggers that come with their own handlers (uvicorn's default config); M3 AC7 routes them
 # through the root handler so the filter sees their records too.
 ROUTED_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi", "fastapi")
+# Third-party loggers held at WARNING whatever LOG_LEVEL is. Their INFO records are prose
+# (so only `unstructured_message` would reach the log) per HTTP call or credential attempt:
+# noise that buries the lifecycle events. uvicorn.access logs the raw path (session ids) and
+# the client address; `api.RequestLogMiddleware` logs `http.request` in its place.
+QUIET_LOGGERS = (
+    "azure.core.pipeline.policies.http_logging_policy",
+    "azure.identity",
+    "httpx2",
+    "uvicorn.access",
+)
 MAX_STR_LEN = 128
 EVENT_NAME = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
 UNSTRUCTURED_EVENT = "unstructured_message"
@@ -145,6 +157,8 @@ def configure_logging(level: str = "INFO") -> None:
         for existing in list(logger.handlers):
             logger.removeHandler(existing)
         logger.propagate = True
+    for name in QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
     install_exception_hooks()
 
 

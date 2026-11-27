@@ -500,3 +500,103 @@ async def test_cancelled_ocr_kills_the_process(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(asyncio.CancelledError):
         await task
     assert started[0].returncode is not None  # killed and reaped, not left running
+
+
+# ---------------------------------------------------------------- M5a AC1: OCR concurrency cap
+
+
+class _BlockingProcess:
+    """Stands in for a Tesseract process: lives until the test releases it."""
+
+    live = 0
+    peak = 0
+
+    def __init__(self, release: asyncio.Event, stdout: bytes) -> None:
+        self.returncode: int | None = None
+        self._release = release
+        self._stdout = stdout
+        type(self).live += 1
+        type(self).peak = max(type(self).peak, type(self).live)
+
+    async def communicate(self, _stdin: bytes) -> tuple[bytes, None]:
+        await self._release.wait()
+        type(self).live -= 1
+        self.returncode = 0
+        return self._stdout, None
+
+    def kill(self) -> None:
+        pass
+
+    async def wait(self) -> int:
+        return 0
+
+
+def _ocr_parser(max_concurrency: int) -> TesseractOcrParser:
+    parser = TesseractOcrParser(
+        dpi=72, lang="eng", cmd=sys.executable, max_concurrency=max_concurrency
+    )
+    parser.install = TesseractInstall("5.0.0", "1.0.0", "0" * 64)  # skip the binary check
+    return parser
+
+
+async def test_third_concurrent_scan_waits_for_a_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With OCR_MAX_CONCURRENCY=2, three scans at once start two processes; the third waits
+    and starts only when one of them ends (M5a AC1). No Tesseract needed."""
+    _BlockingProcess.live = _BlockingProcess.peak = 0
+    releases: list[asyncio.Event] = []
+
+    async def fake_exec(*_args: Any, **_kwargs: Any) -> _BlockingProcess:
+        releases.append(asyncio.Event())
+        return _BlockingProcess(releases[-1], b"text")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    parser = _ocr_parser(max_concurrency=2)
+    pdf = fixture_bytes("scanned_lab_report.pdf")
+    assert page_count(pdf) == 1
+    scans = [asyncio.create_task(parser.parse(pdf)) for _ in range(3)]
+
+    async def settle() -> None:
+        for _ in range(100):  # let rendering threads and the event loop catch up
+            await asyncio.sleep(0.01)
+
+    await settle()
+    assert len(releases) == 2 and _BlockingProcess.live == 2  # the third is queued
+    releases[0].set()
+    await settle()
+    assert len(releases) == 3  # a slot freed: the third starts now
+    for event in releases:
+        event.set()
+    await asyncio.gather(*scans)
+    assert _BlockingProcess.peak == 2
+
+
+async def test_page_order_is_unchanged_under_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Concurrent scans finishing out of order still give every document its pages in page
+    order, identical to a run alone (rule 3). Later pages finish first on purpose."""
+    pdf = fixture_bytes("multi_page_report.pdf")
+    pages = page_count(pdf)
+    assert pages >= 2
+
+    async def fake_run(self: TesseractOcrParser, args: list[str], image: bytes) -> bytes:
+        index = _page_by_image[hashlib.sha256(image).hexdigest()]
+        await asyncio.sleep(0.02 * (pages - index))  # last page is fastest
+        return f"page {index + 1} of {pages}".encode()
+
+    _page_by_image = {
+        hashlib.sha256(render_page_pgm(pdf, i, 72)).hexdigest(): i for i in range(pages)
+    }
+    assert len(_page_by_image) == pages  # pages render differently
+    monkeypatch.setattr(TesseractOcrParser, "_run", fake_run)
+
+    alone = await _ocr_parser(max_concurrency=1).parse(pdf)
+    parser = _ocr_parser(max_concurrency=2)
+    together = await asyncio.gather(*(parser.parse(pdf) for _ in range(4)))
+    expected = tuple(f"page {n} of {pages}" for n in range(1, pages + 1))
+    assert tuple(p.text for p in alone.pages) == expected
+    assert [p.number for p in alone.pages] == list(range(1, pages + 1))
+    assert all(doc == alone for doc in together)
+
+
+def test_ocr_concurrency_must_be_positive() -> None:
+    with pytest.raises(ValueError):
+        TesseractOcrParser(dpi=300, lang="eng", max_concurrency=0)
