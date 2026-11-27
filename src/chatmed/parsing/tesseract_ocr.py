@@ -8,6 +8,7 @@ Its stderr is discarded and never logged or raised, in case it echoes content (h
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
 import re
@@ -165,12 +166,24 @@ class TesseractOcrParser:
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(stdin), PAGE_TIMEOUT_S)
         except TimeoutError:
-            proc.kill()
-            await proc.wait()
+            await _kill(proc)
             raise ParserError("tesseract timed out") from None
+        except BaseException:
+            # Cancelled (the session was closed, D15) or any other error: the process holds
+            # the page image in its memory, so it must not outlive the request.
+            await _kill(proc)
+            raise
         if proc.returncode != 0:
             raise ParserError(f"tesseract failed with exit code {proc.returncode}")
         return stdout
+
+
+async def _kill(proc: asyncio.subprocess.Process) -> None:
+    """Stop the process and reap it, so no OCR process (or its pipes) is left behind."""
+    if proc.returncode is None:
+        with contextlib.suppress(ProcessLookupError):  # it may have just exited
+            proc.kill()
+    await proc.wait()
 
 
 def parse_version_output(output: str) -> tuple[str, str]:

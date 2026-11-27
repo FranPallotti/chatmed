@@ -4,9 +4,12 @@ M1b AC5: Tesseract 4/5 output parsing and tessdata discovery on Linux."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from make_fixtures import (
@@ -471,3 +474,29 @@ def test_docintel_rejects_missing_pages() -> None:
     )
     with pytest.raises(ParserError):
         DocIntelParser._page_texts(result)
+
+
+# ---------------------------------------------------------------- M4 AC2: close during OCR
+
+
+async def test_cancelled_ocr_kills_the_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session closed during OCR cancels the upload (D15): the OCR process must die with it,
+    not keep running with the page image in its memory. A slow Python stands in for Tesseract
+    (no Tesseract needed, so this runs everywhere)."""
+    started: list[asyncio.subprocess.Process] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def recording_exec(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        proc = await real_exec(*args, **kwargs)
+        started.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_exec)
+    parser = TesseractOcrParser(dpi=300, lang="eng", cmd=sys.executable)
+    task = asyncio.create_task(parser._run(["-c", "import time; time.sleep(60)"], b"page"))
+    while not started:
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert started[0].returncode is not None  # killed and reaped, not left running

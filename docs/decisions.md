@@ -408,6 +408,10 @@ Approved by the project owner with the M4 plan.
   Why cancel rather than wait: a wipe that waits on a 25 s question is not a wipe; and without
   the cancellation a question carried on against the closed connection (seen in a mutation
   test: `tool_failed` from the model's tools).
+  A cancelled OCR call kills and reaps its Tesseract process (it holds the page image), so
+  nothing outlives the request (`rules-8`, found in the M4 review). Work already handed to a
+  thread (`asyncio.to_thread`: pdfium text, page rendering) cannot be cancelled: it finishes
+  its one call in memory and its result is dropped.
 - **Closed ids.** The store remembers closed ids (random tokens, no content), the latest
   `CLOSED_IDS_KEPT = 10_000`, so a late call gets `session_closed`; an id never created (or
   forgotten) gets `session_not_found`. Both are 404.

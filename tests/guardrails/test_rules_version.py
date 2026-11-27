@@ -58,6 +58,8 @@ RULES_HASHES = {
     # rules-7 (M4, D15): a DuckDB memory-limit error in a tool ends the question with
     # session_memory_limit instead of reaching the model as tool_failed.
     "rules-7": "9a28582b7b75f4d8cf53f1a64836d452b9ea024194dc224d774d691dd575a8e5",
+    # rules-8 (M4 review, D15): a cancelled OCR call kills the Tesseract process.
+    "rules-8": "ed95e502514a6cd93407a16c00aaf6260afb21d7a3d2ea31d023c5f40cfebae4",
 }
 
 

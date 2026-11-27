@@ -57,7 +57,9 @@ PROMPT_VERSION = "extract-v2"  # v2 (D13): OCR noise, interleaved columns, check
 #          negation; ambiguous source dates support no reading (D14)
 # rules-7: a DuckDB memory-limit error in a tool ends the question (session_memory_limit)
 #          instead of reaching the model as tool_failed (M4 AC4, D15)
-RULES_VERSION = "rules-7"
+# rules-8: a cancelled OCR call (session closed mid-upload) kills the Tesseract process
+#          instead of leaving it running with the page image (M4 AC2, D15)
+RULES_VERSION = "rules-8"
 
 
 class ExtractionError(RuntimeError):
