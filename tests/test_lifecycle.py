@@ -1,8 +1,9 @@
 """M4 AC1-AC3, AC7: session lifecycle through the pipeline and the API (D15).
 
-- AC1: after close, every call with the id is 404 `session_closed`; the TTL sweeper runs with
-  the app; parsed documents and the DuckDB connection are released (weakref) after a real
-  upload and question.
+- AC1: after close, every call with the id is 404 `session_closed`; an expired session is
+  refused on access before any sweep; the sweeper runs with the app and wipes an untouched
+  session at most TTL + sweep interval after its last activity; parsed documents and the
+  DuckDB connection are released (weakref) after a real upload and question.
 - AC2: closing (DELETE or TTL) while an upload or a question waits on the model ends that
   request with `session_closed` and nothing is written after the wipe; both orders.
 - AC3: `MAX_SESSIONS` → 503 `capacity`.
@@ -12,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gc
 import json
 import logging
@@ -19,6 +21,7 @@ import time
 import weakref
 from typing import Any
 
+import duckdb
 import httpx2 as httpx  # the project's test HTTP client (pyproject dev deps)
 import pytest
 from fastapi.testclient import TestClient
@@ -29,6 +32,7 @@ from chatmed.pipeline import (
     answer_question,
     create_session,
     ingest_document,
+    run_sweeper,
 )
 from chatmed.session import InMemorySessionStore, SessionClosed
 from tests.conftest import fixture_bytes
@@ -158,6 +162,77 @@ def test_sweeper_runs_with_the_app_and_shutdown_wipes_the_rest(
     assert closed == [(idle, "ttl"), (open_at_shutdown, "shutdown")]
     shutdown = [r for r in caplog.records if r.getMessage() == "session.shutdown"]
     assert [r.session_count for r in shutdown] == [1]  # type: ignore[attr-defined]
+
+
+def test_expired_session_is_refused_on_access_before_any_sweep(
+    recorded: FakeModelClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Lazy expiry (D15): once the TTL has passed since the last activity, the next access is
+    404 `session_closed` and wipes the session, even though the sweeper has not run."""
+    clock = Clock()
+    store = make_store(ttl_seconds=100, clock=clock)
+    services = make_services(recorded, store=store, session_sweep_interval_seconds=3600)
+    files = {"file": (FIXTURE, fixture_bytes(FIXTURE), "application/pdf")}
+    with caplog.at_level(logging.INFO, logger="chatmed"):
+        with TestClient(create_app(services=services, configure=False)) as api:
+            sid = api.post("/sessions", json={"tenant_id": "acme"}).json()["session_id"]
+            clock.now = 99  # just inside the TTL: still open (and this upload is activity)
+            upload = api.post(f"/sessions/{sid}/documents", files=files, data={"doc_type": "cioms"})
+            assert upload.status_code == 200
+            con = store.facts_db(sid)
+            clock.now = 99 + 100.001  # TTL passed since the upload ended
+            ask = api.post(f"/sessions/{sid}/ask", json={"question": QUESTION})
+            again = api.post(f"/sessions/{sid}/documents", files=files, data={"doc_type": "cioms"})
+            assert [(r.status_code, r.json()["detail"]) for r in (ask, again)] == [
+                (404, "session_closed"),
+                (404, "session_closed"),
+            ]
+            with pytest.raises(duckdb.ConnectionException):
+                con.execute("SELECT 1")  # wiped on that access, not at the next sweep
+    messages = [r.getMessage() for r in caplog.records]
+    assert "session.swept" not in messages  # the sweeper never ran
+    closed = [r for r in caplog.records if r.getMessage() == "session.closed"]
+    assert [(r.session_id, r.reason) for r in closed] == [(sid, "ttl")]  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("last_activity", [0.0, 1.0, 29.99, 30.0, 45.0])
+async def test_sweeper_wipes_within_ttl_plus_interval(
+    last_activity: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The documented bound (D15): an untouched session is wiped by the sweeper more than TTL
+    and at most TTL + sweep interval after its last activity, whatever the activity's phase
+    against the sweeps. `asyncio.sleep` is replaced by one that moves the store's clock, so
+    this is exact and instant."""
+    ttl, interval = 100.0, 30.0
+    clock = Clock()
+    store = make_store(ttl_seconds=ttl, clock=clock)
+    session = store.create("acme")
+    # The sweeper starts at t=0 and sweeps at t=30, 60, ...; the session's last activity is
+    # at t=last_activity (set directly: the fake sleep would jump the clock past it).
+    store._last_used[session.id] = last_activity
+    wiped_at: list[float] = []
+    close = store.close
+
+    def recording_close(session_id: str, reason: Any = "client") -> None:
+        wiped_at.append(clock.now)
+        close(session_id, reason)
+
+    monkeypatch.setattr(store, "close", recording_close)
+    real_sleep = asyncio.sleep
+
+    async def clock_sleep(seconds: float) -> None:
+        clock.now += seconds
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", clock_sleep)
+    sweeper = asyncio.create_task(run_sweeper(store, interval))
+    while not session.closed:
+        await real_sleep(0)
+    sweeper.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await sweeper
+    assert len(wiped_at) == 1
+    assert ttl < wiped_at[0] - last_activity <= ttl + interval
 
 
 # ---------------------------------------------------------------- AC2: close while in flight

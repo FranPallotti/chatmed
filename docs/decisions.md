@@ -390,12 +390,16 @@ Approved by the project owner with the M3 plan.
 
 ## D15. Session lifecycle, concurrency, capacity and the pipeline module (M4)
 Approved by the project owner with the M4 plan.
-- **Idle TTL.** A session expires after `SESSION_TTL_SECONDS` without use. "Use" is
-  `SessionStore.get`, which the pipeline calls when a request starts and when it ends, so a
-  request in progress keeps its session alive; reading documents or facts does not count.
-  Expiry is lazy as well as swept: an expired session already answers `session_closed` before
-  the sweeper (an asyncio task of the app, every `SESSION_SWEEP_INTERVAL_SECONDS`) reaches it,
-  so the TTL is exact whatever the sweep interval. Why idle and not absolute: D5 only said
+- **Idle TTL.** A session expires after `SESSION_TTL_SECONDS` without activity. Activity is
+  `SessionStore.get`, which the pipeline calls when a request starts and when it ends; reading
+  documents or facts does not count. So a request is not protected while it runs: one that
+  takes longer than the TTL can be closed half-way (with the defaults, 1800 s against a 25 s
+  question, this does not happen; an upload is bounded by its page count and timeouts).
+  The guarantee: once the TTL has passed since the last activity, every access refuses the
+  session with `session_closed` and wipes it (lazy expiry, whatever the sweep interval); a
+  session nobody touches again is wiped by the sweeper (an asyncio task of the app, every
+  `SESSION_SWEEP_INTERVAL_SECONDS`) at most TTL + sweep interval after its last activity.
+  Why idle and not absolute: D5 only said
   "TTL + wipe"; a reviewer working through a case should not lose the session mid-review.
 - **Close is immediate and cancels in-flight work.** `close(id, reason)` (reason `client` |
   `ttl` | `shutdown`) marks the session closed, cancels its in-flight tasks, closes its DuckDB
@@ -422,7 +426,10 @@ Approved by the project owner with the M4 plan.
 - **Memory limit.** No spilling, so over `memory_limit` DuckDB fails: on upload the facts
   insert (one transaction) is rolled back and the request is 503 `session_memory_limit`; in a
   tool the question ends with the `error` code `session_memory_limit` instead of reaching the
-  model as `tool_failed` (`chatmed.agent.loop`, hence `rules-7`). Found while testing: on
+  model as `tool_failed` (`chatmed.agent.loop`, hence `rules-7`). Either way the session stays
+  open and as it was before the request: no document or facts from the failed upload, no
+  history entry from the failed question, the connection usable; the client may retry or
+  go on (tested with real DuckDB out-of-memory errors). Found while testing: on
   DuckDB 2.0 `enable_external_access=false` does not lock `memory_limit` (`SET memory_limit`
   still worked), so the connection now also runs `SET lock_configuration=true` last, which
   makes every setting read-only (tested).

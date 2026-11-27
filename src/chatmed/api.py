@@ -181,7 +181,6 @@ def create_app(*, services: Services | None = None, configure: bool = True) -> F
     async def upload(session_id: str, request: Request) -> dict[str, Any]:
         services = svc(request)
         s = services.settings
-        _session(services, session_id)
 
         async def read_upload() -> tuple[bytes, str]:
             """Runs under the session lock (one upload body per session at a time)."""

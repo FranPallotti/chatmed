@@ -9,10 +9,13 @@ needed: `enable_external_access=false` alone blocks `SET temp_directory` but not
 `SET memory_limit` (DuckDB 1.x/2.x), as tests/guardrails/test_duckdb_no_disk.py shows.
 
 Lifecycle (D15):
-- A session is idle when it has not been used (`get`) for `ttl_seconds`. `get` is called when
-  a request starts and when it ends, so a request in progress keeps its session alive.
-- Expiry is lazy as well as swept: an expired session that the sweeper has not reached yet
-  already answers `SessionClosed`, so the TTL is exact whatever the sweep interval.
+- Last activity is a `get`, which the pipeline calls when a request starts and when it ends.
+  Reading documents or facts does not count, so a request is not protected while it runs: one
+  that takes longer than `ttl_seconds` can be closed half-way (and is then cancelled).
+- The guarantee: once `ttl_seconds` have passed since the last activity, every access refuses
+  the session with `SessionClosed` and wipes it (lazy expiry, whatever the sweep interval);
+  a session nobody touches again is wiped by the sweeper at most `ttl_seconds` + the sweep
+  interval after its last activity.
 - Closing cancels the session's in-flight tasks, closes its DuckDB and drops every reference
   to documents, facts and history. Closed ids (random tokens, no content) are remembered, up
   to `CLOSED_IDS_KEPT`, so a late call gets `SessionClosed` rather than `SessionNotFound`.

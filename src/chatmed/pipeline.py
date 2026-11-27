@@ -183,6 +183,8 @@ async def _ingest_locked(
             raise PipelineError("unreadable_pdf", 422) from None
         if len(doc.pages) > s.max_pages_per_doc:
             raise PipelineError("too_many_pages", 422)
+        # Checked here so a duplicate never pays for an extraction; `_store_document` checks
+        # again just before writing, where it guarantees facts and document go in together.
         if any(d.doc.sha256 == doc.sha256 for d in services.store.get_documents(session.id)):
             raise PipelineError("duplicate_document", 409)
         repo = services.repo_factory(session.tenant_id)  # bound to the session's tenant (rule 5)
@@ -301,6 +303,15 @@ class SessionRun:
     facts: list[tuple[Any, ...]]
 
 
+def _upload_of(pdf: bytes, doc_type: str) -> ReadUpload:
+    """A `ReadUpload` that returns bytes already in memory (what the API reads from HTTP)."""
+
+    async def read() -> tuple[bytes, str]:
+        return pdf, doc_type
+
+    return read
+
+
 async def run_full_session(
     services: Services,
     tenant_id: str,
@@ -316,12 +327,8 @@ async def run_full_session(
     try:
         documents = []
         for path in pdf_paths:
-            data = Path(path).read_bytes()
-
-            async def read(data: bytes = data) -> tuple[bytes, str]:
-                return data, doc_type
-
-            documents.append(await ingest_document(services, session.id, read))
+            reader = _upload_of(Path(path).read_bytes(), doc_type)
+            documents.append(await ingest_document(services, session.id, reader))
         answers = [await answer_question(services, session.id, q) for q in questions]
         facts = (
             services.store.facts_db(session.id)

@@ -79,9 +79,10 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 - Each session owns: tenant id (fixed at creation, D14), documents (ordered by sha256), a DuckDB
   `:memory:` connection, chat history (questions and verified answer texts), a lock that
   serializes uploads and questions within the session, and its in-flight tasks.
-- Lifecycle (D15): idle TTL (`SESSION_TTL_SECONDS`; `get` at the start and end of a request
-  counts as use), checked lazily on every access and swept by an asyncio task of the app every
-  `SESSION_SWEEP_INTERVAL_SECONDS`. `close` (client `DELETE`, `ttl`, `shutdown`) is idempotent
+- Lifecycle (D15): idle TTL (`SESSION_TTL_SECONDS`; the start and end of a request count as
+  activity, not the time in between). Once the TTL has passed, every access refuses the session
+  (`session_closed`) and wipes it; untouched, it is wiped by an asyncio sweeper at most
+  TTL + `SESSION_SWEEP_INTERVAL_SECONDS` after its last activity. `close` (client `DELETE`, `ttl`, `shutdown`) is idempotent
   and immediate: it cancels in-flight uploads/questions (they end with `session_closed`, nothing
   is written after the wipe), closes DuckDB and drops documents, facts and history. Closed ids
   (ids only, the latest 10 000) answer `session_closed`; unknown ids `session_not_found`.
