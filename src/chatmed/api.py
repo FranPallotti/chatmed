@@ -11,6 +11,9 @@ Privacy choices (rules 1, 2):
 The tenant of a session is given at creation and checked against `TENANTS` (D14); in M5 it
 comes from the caller's Entra ID token instead.
 
+The work itself (sessions, upload, ask, lifecycle) is in `chatmed.pipeline`; this module maps
+its fixed error codes to HTTP and runs the TTL sweeper while the app is up (M4, D15).
+
 Run: `uv run uvicorn chatmed.api:app` (uvicorn's own log handlers are replaced at startup) or
 `uv run python -m chatmed.api` (starts uvicorn with `log_config=None`).
 """
@@ -18,13 +21,12 @@ Run: `uv run uvicorn chatmed.api:app` (uvicorn's own log handlers are replaced a
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
-from collections import Counter
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from email import policy
 from email.parser import BytesParser
 from typing import Any
@@ -33,27 +35,22 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from chatmed.agent import AgentError, ToolContext, run_agent
-from chatmed.config import Settings, get_settings
-from chatmed.extraction import ExtractionError, extract_for_tenant, load_facts, make_client
+from chatmed.agent import AgentError
+from chatmed.config import get_settings
 from chatmed.logconfig import asyncio_exception_handler, configure_logging
-from chatmed.parsing import DocumentParser, ParserError, build_parser
-from chatmed.session import (
-    DuplicateDocument,
-    InMemorySessionStore,
-    Session,
-    SessionFull,
-    SessionNotFound,
-    SessionStore,
-    StoredDocument,
+from chatmed.pipeline import (
+    PipelineError,
+    Services,
+    answer_question,
+    build_services,
+    close_all_sessions,
+    create_session,
+    ingest_document,
+    run_sweeper,
 )
-from chatmed.tenant_db import (
-    PostgresTenantRepository,
-    TenantNotAllowed,
-    TenantRepository,
-    UnknownDocumentType,
-    tenant_dsn,
-)
+from chatmed.session import Session, SessionNotFound
+
+__all__ = ["Services", "create_app", "parse_multipart"]
 
 log = logging.getLogger(__name__)
 
@@ -61,30 +58,6 @@ MB = 1024 * 1024
 MULTIPART_OVERHEAD = 64 * 1024  # boundaries and part headers on top of the file itself
 DOC_TYPE = re.compile(r"^[a-z0-9_]{1,64}$")
 NDJSON = "application/x-ndjson"
-
-
-@dataclass
-class Services:
-    """Everything the endpoints need; built once at startup (or injected by tests)."""
-
-    settings: Settings
-    store: SessionStore
-    parser: DocumentParser
-    model_client: Any  # AsyncAzureOpenAI or a fake with the same `chat.completions.create`
-    repo_factory: Callable[[str], TenantRepository]  # tenant id -> repository bound to it
-
-
-async def build_services(settings: Settings) -> Services:
-    return Services(
-        settings=settings,
-        store=InMemorySessionStore(
-            max_docs=settings.max_docs_per_session,
-            duckdb_memory_limit=settings.duckdb_memory_limit,
-        ),
-        parser=await build_parser(settings),
-        model_client=make_client(settings.azure_openai_endpoint, settings.azure_openai_api_version),
-        repo_factory=lambda tenant: PostgresTenantRepository(settings, tenant),
-    )
 
 
 class CreateSession(BaseModel):
@@ -95,11 +68,18 @@ class AskBody(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
 
 
+def _http(exc: PipelineError | SessionNotFound) -> HTTPException:
+    """Fixed codes only: `session_closed` / `session_not_found` are 404 (D15)."""
+    if isinstance(exc, PipelineError):
+        return HTTPException(exc.http_status, exc.code)
+    return HTTPException(404, exc.code)
+
+
 def _session(services: Services, session_id: str) -> Session:
     try:
         return services.store.get(session_id)
-    except SessionNotFound:
-        raise HTTPException(404, "session_not_found") from None
+    except SessionNotFound as exc:  # SessionClosed included
+        raise _http(exc) from None
 
 
 async def _read_body(request: Request, limit: int) -> bytes:
@@ -159,10 +139,23 @@ def create_app(*, services: Services | None = None, configure: bool = True) -> F
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Startup: build services, start the TTL sweeper. Shutdown: stop it, wipe every
+        session (M4 AC1, AC7)."""
         asyncio.get_running_loop().set_exception_handler(asyncio_exception_handler)
         if not hasattr(app.state, "services"):
             app.state.services = await build_services(settings)
-        yield
+        store = app.state.services.store
+        sweeper = asyncio.create_task(
+            run_sweeper(store, settings.session_sweep_interval_seconds), name="ttl-sweeper"
+        )
+        app.state.sweeper = sweeper
+        try:
+            yield
+        finally:
+            sweeper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sweeper
+            close_all_sessions(store)
 
     app = FastAPI(title="ChatMed", lifespan=lifespan)
     if services is not None:
@@ -178,97 +171,50 @@ def create_app(*, services: Services | None = None, configure: bool = True) -> F
         return JSONResponse({"detail": "internal_error"}, status_code=500)
 
     @app.post("/sessions", status_code=201)
-    async def create_session(body: CreateSession, request: Request) -> dict[str, str]:
-        services = svc(request)
+    async def create(body: CreateSession, request: Request) -> dict[str, str]:
         try:
-            tenant_dsn(services.settings, body.tenant_id)  # allow-list + pattern (D13a, D14)
-        except TenantNotAllowed:
-            raise HTTPException(422, "tenant_not_allowed") from None
-        return {"session_id": services.store.create(body.tenant_id).id}
+            return {"session_id": create_session(svc(request), body.tenant_id).id}
+        except PipelineError as exc:
+            raise _http(exc) from None
 
     @app.post("/sessions/{session_id}/documents")
     async def upload(session_id: str, request: Request) -> dict[str, Any]:
         services = svc(request)
         s = services.settings
-        session = _session(services, session_id)
-        async with session.lock:
-            if len(services.store.get_documents(session_id)) >= s.max_docs_per_session:
-                raise HTTPException(409, "too_many_documents")
+
+        async def read_upload() -> tuple[bytes, str]:
+            """Runs under the session lock (one upload body per session at a time)."""
             body = await _read_body(request, s.max_upload_mb * MB + MULTIPART_OVERHEAD)
             pdf, doc_type = parse_multipart(request.headers.get("content-type", ""), body)
             if len(pdf) > s.max_upload_mb * MB:
                 raise HTTPException(413, "upload_too_large")
             if not pdf.startswith(b"%PDF-"):
                 raise HTTPException(415, "pdf_required")
-            return await _ingest(services, session, pdf, doc_type)
+            return pdf, doc_type
+
+        try:
+            return await ingest_document(services, session_id, read_upload)
+        except (PipelineError, SessionNotFound) as exc:
+            raise _http(exc) from None
 
     @app.post("/sessions/{session_id}/ask")
     async def ask(session_id: str, body: AskBody, request: Request) -> StreamingResponse:
         services = svc(request)
         session = _session(services, session_id)
         return StreamingResponse(
-            _answer_stream(services, session, body.question), media_type=NDJSON
+            _answer_stream(services, session.id, body.question), media_type=NDJSON
         )
 
     @app.delete("/sessions/{session_id}", status_code=204)
     async def close_session(session_id: str, request: Request) -> Response:
-        svc(request).store.close(session_id)  # idempotent wipe
+        svc(request).store.close(session_id, "client")  # idempotent wipe
         return Response(status_code=204)
 
     return app
 
 
-async def _ingest(
-    services: Services, session: Session, pdf: bytes, doc_type: str
-) -> dict[str, Any]:
-    """Parse, check limits, extract, load facts into the session DuckDB, keep the document."""
-    s = services.settings
-    try:
-        doc = await services.parser.parse(pdf)
-    except ParserError:
-        raise HTTPException(422, "unreadable_pdf") from None
-    if len(doc.pages) > s.max_pages_per_doc:
-        raise HTTPException(422, "too_many_pages")
-    if any(d.doc.sha256 == doc.sha256 for d in services.store.get_documents(session.id)):
-        raise HTTPException(409, "duplicate_document")
-    repo = services.repo_factory(session.tenant_id)  # bound to the session's tenant (rule 5)
-    try:
-        result = await extract_for_tenant(services.model_client, repo, doc, doc_type, settings=s)
-    except UnknownDocumentType:
-        raise HTTPException(422, "unknown_document_type") from None
-    except ExtractionError:
-        raise HTTPException(502, "extraction_failed") from None
-    try:
-        services.store.put_document(session.id, StoredDocument(doc, doc_type, result.fingerprint))
-    except DuplicateDocument:
-        raise HTTPException(409, "duplicate_document") from None
-    except SessionFull:
-        raise HTTPException(409, "too_many_documents") from None
-    load_facts(services.store.facts_db(session.id), result.facts)
-    log.info(
-        "api.document_added",
-        extra={
-            "session_id": session.id,
-            "tenant_id": session.tenant_id,
-            "doc_sha256": doc.sha256,
-            "doc_type": doc_type,
-            "page_count": len(doc.pages),
-        },
-    )
-    join = sorted({f.join_status for f in result.facts if f.join_status})
-    return {
-        "sha256": doc.sha256,
-        "doc_type": doc_type,
-        "page_count": len(doc.pages),
-        "parser_id": doc.parser_id,
-        "fingerprint": result.fingerprint,
-        "statuses": dict(sorted(Counter(f.status for f in result.facts).items())),
-        "join_status": join[0] if len(join) == 1 else None,
-    }
-
-
 async def _answer_stream(
-    services: Services, session: Session, question: str
+    services: Services, session_id: str, question: str
 ) -> AsyncIterator[bytes]:
     """NDJSON: `started`, metadata-only `tool` events, then one `answer` (or `error`) (D14)."""
     yield _line({"event": "started"})
@@ -276,18 +222,7 @@ async def _answer_stream(
 
     async def produce() -> None:
         try:
-            async with session.lock:
-                s = services.settings
-                ctx = ToolContext(
-                    facts_db=services.store.facts_db(session.id),
-                    documents=services.store.get_documents(session.id),
-                    repo=services.repo_factory(session.tenant_id),
-                    fulltext_max_chars=s.agent_fulltext_max_chars,
-                    bm25_top_k=s.agent_bm25_top_k,
-                )
-                answer = await run_agent(
-                    services.model_client, session, ctx, question, settings=s, on_event=queue.put
-                )
+            answer = await answer_question(services, session_id, question, on_event=queue.put)
             await queue.put(
                 {
                     "event": "answer",
@@ -300,10 +235,10 @@ async def _answer_stream(
             )
         except AgentError as exc:
             await queue.put({"event": "error", "code": exc.code})
-        except SessionNotFound:
-            await queue.put({"event": "error", "code": "session_not_found"})
+        except SessionNotFound as exc:  # SessionClosed included (D15)
+            await queue.put({"event": "error", "code": exc.code})
         except Exception:
-            log.error("api.ask_failed", exc_info=True, extra={"session_id": session.id})
+            log.error("api.ask_failed", exc_info=True, extra={"session_id": session_id})
             await queue.put({"event": "error", "code": "internal_error"})
         finally:
             await queue.put(None)

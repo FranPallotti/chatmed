@@ -74,17 +74,36 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
 
 ### Session (`src/chatmed/session/`)
 - `SessionStore` interface (`create`, `get`, `put_document`, `get_documents`, `facts_db`,
-  `close`; `get` added in M3, D14). POC: `InMemorySessionStore` (dict, explicit idempotent wipe;
-  the TTL sweeper comes in M4).
+  `close(id, reason)`, `expire_idle`, `close_all`; `get` added in M3 (D14), the last two and the
+  close reason in M4 (D15)). POC: `InMemorySessionStore` (dict).
 - Each session owns: tenant id (fixed at creation, D14), documents (ordered by sha256), a DuckDB
-  `:memory:` connection, chat history (questions and verified answer texts), and a lock that
-  serializes uploads and questions within the session.
-- DuckDB is opened with `temp_directory=''`, `memory_limit`, then
-  `SET enable_external_access=false` (no `COPY TO`, `ATTACH` or file reads, and the two settings
-  above can no longer be changed on that connection).
-- DuckDB settings per connection: in-memory only, no spilling to disk
-  (set `temp_directory` to an empty value and verify with the no-persistence guardrail test;
-  keep `memory_limit` within container RAM and fail clearly if exceeded).
+  `:memory:` connection, chat history (questions and verified answer texts), a lock that
+  serializes uploads and questions within the session, and its in-flight tasks.
+- Lifecycle (D15): idle TTL (`SESSION_TTL_SECONDS`; the start and end of a request count as
+  activity, not the time in between). Once the TTL has passed, every access refuses the session
+  (`session_closed`) and wipes it; untouched, it is wiped by an asyncio sweeper at most
+  TTL + `SESSION_SWEEP_INTERVAL_SECONDS` after its last activity. `close` (client `DELETE`, `ttl`, `shutdown`) is idempotent
+  and immediate: it cancels in-flight uploads/questions (they end with `session_closed`, nothing
+  is written after the wipe), closes DuckDB and drops documents, facts and history. Closed ids
+  (ids only, the latest 10 000) answer `session_closed`; unknown ids `session_not_found`.
+  `MAX_SESSIONS` caps open sessions (503 `capacity`). Events: `session.created`,
+  `session.closed` (with `reason`), `session.rejected`, `session.swept`, `session.shutdown`.
+- DuckDB is opened with `temp_directory=''` (no spilling to disk: over `memory_limit` a query
+  fails, `session_memory_limit`) and `memory_limit`, then `SET enable_external_access=false`
+  (no `COPY TO`, `ATTACH` or file reads) and last `SET lock_configuration=true`, because
+  `enable_external_access` alone does not stop `SET memory_limit` (D15). Proven by
+  `tests/guardrails/test_duckdb_no_disk.py`, including DuckDB's default `.tmp` spill directory
+  (a control test shows a plain connection does spill there).
+- **Worst-case memory** (defaults: `MAX_SESSIONS=20`, `MAX_DOCS_PER_SESSION=5`,
+  `MAX_UPLOAD_MB=20`, `DUCKDB_MEMORY_LIMIT=128MB`). Per session, held until close: DuckDB
+  ≤ 128 MB; parsed text of ≤ 5 documents (the PDF bytes are dropped after parsing; text is at
+  most about the PDF size, so ≤ 100 MB, typically < 1 MB); history (a few KB per question).
+  While an upload runs (at most one per session, it reads its body under the session lock):
+  body + decoded file part ≈ 2 × 20 MB, plus for OCR one page image at 300 DPI (≈ 9 MB for A4
+  grayscale) and the Tesseract process (≈ 290 MB peak, D10). Worst case, all 20 sessions full
+  and uploading scans at once: 20 × (128 + 100 + 40 + 300) MB ≈ 11 GB; without concurrent OCR
+  ≈ 5.4 GB; with typical documents (text < 1 MB, facts < 1 MB) it is dominated by in-flight
+  uploads. M5 must size the container for it or lower `MAX_SESSIONS` (open question 8).
 - Later (only if time / needed): `EncryptedBlobSessionStore` with **crypto-shredding**:
   per-session AES-256 key held only in memory; dropping the key on close makes any
   remaining copy unreadable.
@@ -145,20 +164,33 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
   a fingerprint (agent prompt version, rules version, `FINGERPRINT_SETTINGS` values, tenant,
   document fingerprints, and digests of the session history and of each tenant DB read); a fallback carries outcome `fallback` and a reason code instead.
 
-### API (`src/chatmed/api.py`)
-- `POST /sessions {"tenant_id"}` → session id (tenant checked against `TENANTS`, D14)
+### Pipeline (`src/chatmed/pipeline.py`) and API (`src/chatmed/api.py`)
+- `chatmed.pipeline` does the work without HTTP (D15): `create_session` (tenant allow-list, then
+  capacity), `ingest_document`, `answer_question` (each runs as a task the session's close can
+  cancel, `run_in_session`), `run_sweeper`, `close_all_sessions`, and `run_full_session`
+  (create → upload → ask → close) used by the guardrail tests. Errors are `PipelineError` with a
+  fixed code and HTTP status. Facts go into DuckDB in one transaction together with the
+  document, or not at all.
+- `chatmed.api` is the HTTP transport over it; the app's lifespan starts the TTL sweeper and,
+  at shutdown, stops it and closes every session (reason `shutdown`).
+- `POST /sessions {"tenant_id"}` → session id (tenant checked against `TENANTS`, D14);
+  503 `capacity` over `MAX_SESSIONS`
 - `POST /sessions/{id}/documents` (multipart `file` + `doc_type`) → sha256, page count,
   parser id, fingerprint, counts per status, join status (no values)
 - `POST /sessions/{id}/ask {"question"}` → NDJSON: `started`, metadata-only `tool` events,
   then one `answer` event (`outcome` verified|fallback, `reason`, `text`, `facts_used`,
-  `fingerprint` for verified answers) or an `error` code (D14)
+  `fingerprint` for verified answers) or an `error` code (D14; `session_closed`,
+  `session_memory_limit`, ...)
 - `DELETE /sessions/{id}` → idempotent wipe (204)
+- After close every call with the id is 404 `session_closed`; an unknown id is 404
+  `session_not_found`.
 - The multipart body is streamed into memory with a byte counter (limit `MAX_UPLOAD_MB` +
   64 KiB): an oversized Content-Length is refused before reading, and the first chunk past the
   limit ends the read. It is parsed with the stdlib `email` parser: Starlette's `UploadFile`
   spools files above 1 MB to disk.
 - Limits: 413 `upload_too_large`, 422 `too_many_pages`, 409 `too_many_documents` /
-  `duplicate_document`, 415 `pdf_required`. Errors are fixed codes. No body is ever logged.
+  `duplicate_document`, 415 `pdf_required`, 503 `session_memory_limit`. Errors are fixed
+  codes. No body is ever logged.
 - Run with `uv run uvicorn chatmed.api:app` or `uv run python -m chatmed.api`.
 
 ### Logging (`src/chatmed/logconfig.py`)

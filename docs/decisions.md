@@ -387,3 +387,61 @@ Approved by the project owner with the M3 plan.
   limit (`MAX_UPLOAD_MB` + 64 KiB multipart overhead) is refused with 413 before any byte is
   read, and the first chunk past the limit ends the read with 413 (Content-Length may be absent
   or wrong). The file part itself is then checked against `MAX_UPLOAD_MB`.
+
+## D15. Session lifecycle, concurrency, capacity and the pipeline module (M4)
+Approved by the project owner with the M4 plan.
+- **Idle TTL.** A session expires after `SESSION_TTL_SECONDS` without activity. Activity is
+  `SessionStore.get`, which the pipeline calls when a request starts and when it ends; reading
+  documents or facts does not count. So a request is not protected while it runs: one that
+  takes longer than the TTL can be closed half-way (with the defaults, 1800 s against a 25 s
+  question, this does not happen; an upload is bounded by its page count and timeouts).
+  The guarantee: once the TTL has passed since the last activity, every access refuses the
+  session with `session_closed` and wipes it (lazy expiry, whatever the sweep interval); a
+  session nobody touches again is wiped by the sweeper (an asyncio task of the app, every
+  `SESSION_SWEEP_INTERVAL_SECONDS`) at most TTL + sweep interval after its last activity.
+  Why idle and not absolute: D5 only said
+  "TTL + wipe"; a reviewer working through a case should not lose the session mid-review.
+- **Close is immediate and cancels in-flight work.** `close(id, reason)` (reason `client` |
+  `ttl` | `shutdown`) marks the session closed, cancels its in-flight tasks, closes its DuckDB
+  and drops documents, facts and history. Every upload and question runs as a task registered
+  on the session (`pipeline.run_in_session`); the cancellation lands at the task's next await,
+  before it can write, and the request ends with `session_closed` (404 / NDJSON `error`). A
+  caller's own cancellation (client gone) propagates unchanged and leaves the session open.
+  The store also refuses writes for a closed session, and the facts insert plus
+  `put_document` run with no await between them, so a close can never land half-way.
+  Why cancel rather than wait: a wipe that waits on a 25 s question is not a wipe; and without
+  the cancellation a question carried on against the closed connection (seen in a mutation
+  test: `tool_failed` from the model's tools).
+  A cancelled OCR call kills and reaps its Tesseract process (it holds the page image), so
+  nothing outlives the request (`rules-8`, found in the M4 review). Work already handed to a
+  thread (`asyncio.to_thread`: pdfium text, page rendering) cannot be cancelled: it finishes
+  its one call in memory and its result is dropped.
+- **Closed ids.** The store remembers closed ids (random tokens, no content), the latest
+  `CLOSED_IDS_KEPT = 10_000`, so a late call gets `session_closed`; an id never created (or
+  forgotten) gets `session_not_found`. Both are 404.
+- **Capacity.** `MAX_SESSIONS` (default 20, operational) caps open sessions; expired sessions
+  are wiped before the check. Above it `POST /sessions` is 503 `capacity`, logged as
+  `session.rejected`. `DUCKDB_MEMORY_LIMIT` default lowered from 1 GB to 128 MB (the facts
+  table is tiny; 20 × 1 GB was not a bound). Worst case in `architecture.md`.
+- **Memory limit.** No spilling, so over `memory_limit` DuckDB fails: on upload the facts
+  insert (one transaction) is rolled back and the request is 503 `session_memory_limit`; in a
+  tool the question ends with the `error` code `session_memory_limit` instead of reaching the
+  model as `tool_failed` (`chatmed.agent.loop`, hence `rules-7`). Either way the session stays
+  open and as it was before the request: no document or facts from the failed upload, no
+  history entry from the failed question, the connection usable; the client may retry or
+  go on (tested with real DuckDB out-of-memory errors). Found while testing: on
+  DuckDB 2.0 `enable_external_access=false` does not lock `memory_limit` (`SET memory_limit`
+  still worked), so the connection now also runs `SET lock_configuration=true` last, which
+  makes every setting read-only (tested).
+- **Interface change.** `SessionStore` gains `expire_idle() -> int` and
+  `close_all(reason) -> int` (the app runs the sweeper and the shutdown wipe without knowing
+  how sessions are stored; the encrypted store will need both), and `close` takes the reason.
+  `Session` gains `closed` and `inflight`.
+- **Pipeline module.** `chatmed.pipeline` holds what `chatmed.api` did besides HTTP
+  (`Services`, create, upload, ask, the sweeper, the shutdown wipe) plus
+  `run_full_session` (create → upload → ask → close). The API is a thin transport over it, and
+  the guardrail tests run the same code. It is classed as not output-deciding, like `api`
+  (orchestration moved, not new rules; `test_guard_coverage.py`).
+- **Lifecycle events** (metadata only): `session.created` (session, tenant),
+  `session.closed` (session, tenant, `reason`), `session.rejected` (tenant, `status`
+  `capacity`), `session.swept` and `session.shutdown` (`session_count`).

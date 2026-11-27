@@ -63,12 +63,14 @@ class Settings(BaseSettings):
 
     # Session (only the in-memory store exists; encrypted_blob is a stretch goal)
     session_store: Literal["memory"] = "memory"
-    session_ttl_seconds: int = Field(default=1800, gt=0)
+    session_ttl_seconds: int = Field(default=1800, gt=0)  # idle time before the wipe (D15)
+    session_sweep_interval_seconds: float = Field(default=60.0, gt=0)  # TTL sweeper period
+    max_sessions: int = Field(default=20, gt=0)  # open sessions at once; bounds memory (M4 AC3)
     max_docs_per_session: int = Field(default=5, gt=0)
     max_pages_per_doc: int = Field(default=30, gt=0)
     max_upload_mb: int = Field(default=20, gt=0)
     extraction_max_chars: int = Field(default=60_000, gt=0)
-    duckdb_memory_limit: str = "1GB"
+    duckdb_memory_limit: str = "128MB"  # per session; see architecture.md
 
     # Tenant DB (D8): one database per tenant, chosen by code from the session's tenant.
     # Read-only role; no password in the DSN (Entra token in Azure, PGPASSWORD env locally).
@@ -145,6 +147,8 @@ OPERATIONAL_SETTINGS: frozenset[str] = frozenset(
         "tesseract_cmd",  # where the binary is; its version is in parser_id
         "session_store",
         "session_ttl_seconds",
+        "session_sweep_interval_seconds",
+        "max_sessions",  # admission limit: reject, never change facts
         "max_docs_per_session",  # admission limits: reject, never change facts
         "max_pages_per_doc",
         "max_upload_mb",
