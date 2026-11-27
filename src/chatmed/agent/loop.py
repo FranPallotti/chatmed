@@ -22,6 +22,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+import duckdb
 import openai
 
 from chatmed.agent import prompt
@@ -194,6 +195,11 @@ async def _run_tool(ctx: ToolContext, session_id: str, name: str, arguments: str
     start = time.perf_counter()
     try:
         result = await dispatch(ctx, name, arguments)
+    except duckdb.OutOfMemoryException:
+        # The session DuckDB hit its memory limit (no spill to disk, M4 AC4): the question
+        # ends with this code instead of letting the model carry on without the data.
+        log.warning("agent.memory_limit", extra={"session_id": session_id, "tool_name": name})
+        raise AgentError("session_memory_limit") from None
     except Exception:  # e.g. tenant DB down: the model gets a code, the log gets the type only
         log.warning(
             "agent.tool_failed", exc_info=True, extra={"session_id": session_id, "tool_name": name}

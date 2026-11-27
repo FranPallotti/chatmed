@@ -54,6 +54,8 @@ ALLOWED_FIELDS: frozenset[str] = frozenset(
         "tool_name",  # one of the fixed agent tool names
         "iteration",
         "output_chars",  # length of a rejected model answer, never the answer itself
+        "reason",  # fixed codes only: why a session closed (client | ttl | shutdown)
+        "session_count",  # how many sessions a sweep or shutdown closed
     }
 )
 # Loggers that come with their own handlers (uvicorn's default config); M3 AC7 routes them

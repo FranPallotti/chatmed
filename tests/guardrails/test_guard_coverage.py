@@ -21,6 +21,8 @@ NOT_OUTPUT_DECIDING = {
     "chatmed.config": "loads settings; their values (not code) enter both fingerprints (D6)",
     "chatmed.logconfig": "logging only; never changes an answer",
     "chatmed.api": "transport: request parsing, NDJSON events, limits; passes data through",
+    "chatmed.pipeline": "orchestration (moved from api, D15): parse, extract, store, ask, "
+    "close in order; lifecycle and error codes; passes data through",
     "chatmed.agent": "re-exports",
     "chatmed.parsing": "builds the configured parser; the choice is recorded in parser_id",
     "chatmed.session": "re-exports",

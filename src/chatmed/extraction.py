@@ -55,7 +55,9 @@ PROMPT_VERSION = "extract-v2"  # v2 (D13): OCR noise, interleaved columns, check
 # rules-5: extraction fingerprint over FINGERPRINT_SETTINGS values too (D6)
 # rules-6: answer fingerprint over tenant, history and tenant reads; stricter status
 #          negation; ambiguous source dates support no reading (D14)
-RULES_VERSION = "rules-6"
+# rules-7: a DuckDB memory-limit error in a tool ends the question (session_memory_limit)
+#          instead of reaching the model as tool_failed (M4 AC4, D15)
+RULES_VERSION = "rules-7"
 
 
 class ExtractionError(RuntimeError):

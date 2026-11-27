@@ -80,7 +80,8 @@ src/chatmed/
   session/          # SessionStore interface + in-memory implementation (+ encrypted later)
   tenant_db/        # read-only repository + parameterized tools
   agent/            # tool definitions, agent loop, answer composition with citations
-  api.py            # FastAPI app: sessions, upload, ask, close
+  pipeline.py       # create -> upload -> ask -> close without HTTP; lifecycle (D15)
+  api.py            # FastAPI app: HTTP transport over pipeline.py
 tests/
   contracts/        # tests every implementation of an interface must pass
   guardrails/       # no-persistence, no-content-in-logs, reproducibility
@@ -92,8 +93,8 @@ docs/               # architecture, decisions, milestones, open questions
 ## Interfaces (keep them small; do not add methods without a reason in docs/decisions.md)
 
 - `DocumentParser.parse(pdf_bytes) -> ParsedDocument` (async)
-- `SessionStore`: `create`, `get` (D14), `put_document`, `get_documents`, `facts_db`, `close`
-  (idempotent wipe)
+- `SessionStore`: `create`, `get` (D14), `put_document`, `get_documents`, `facts_db`,
+  `close(id, reason)` (idempotent wipe), `expire_idle`, `close_all` (D15)
 - Implementations are chosen by config (`PARSER`, `OCR_BACKEND`, `SESSION_STORE`), never per request.
 
 ## How to work
