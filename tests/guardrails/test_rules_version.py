@@ -69,6 +69,8 @@ RULES_HASHES = {
     "rules-11": "5395e887f0193173fdcdbb616c96b2542dd85a53ad013d6f8470262264b7c52f",
     # rules-12 (M5a review): rendered reconciliation ends with a scope line.
     "rules-12": "6af19eb85ef92024f7cc91e441404a487f6d985613f853cc9bd6436ca0d725c5",
+    # rules-13 (M5b AC9, D17): the tenant repository takes the tenant's reader password.
+    "rules-13": "5a1333977eb8d2d771197718a6e15ca2977a77a400123a3d0e53f5e3d0ba78b1",
 }
 
 

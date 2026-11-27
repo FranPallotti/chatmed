@@ -59,7 +59,7 @@ def test_runtime_is_the_default_target_non_root_and_minimal() -> None:
     base, runtime = stages["base"], stages["runtime"]
     assert re.findall(r"^USER\s+(\S+)", runtime, flags=re.M) == ["chatmed"]
     assert 'CMD ["python", "-m", "chatmed.api"]' in runtime  # log_config=None (AC2)
-    assert "--no-install-recommends tesseract-ocr tesseract-ocr-eng" in base
+    assert "--no-install-recommends tesseract-ocr tesseract-ocr-eng ca-certificates" in base
     assert "rm -rf /var/lib/apt/lists/*" in base
     assert "TESSDATA_PREFIX=" in base  # explicit tessdata (M1b AC5)
     # Only the venv from the builder: no uv, no source tree, no dev dependencies, no tests.

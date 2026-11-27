@@ -13,6 +13,8 @@ import logging
 import time
 from typing import Any, Protocol
 
+from pydantic import SecretStr
+
 from chatmed.config import TENANT_ID, TENANT_PLACEHOLDER, Settings
 from chatmed.extraction import DocTypeSchema
 
@@ -72,10 +74,16 @@ def tenant_dsn(settings: Settings, tenant_id: str) -> str:
 
 
 class PostgresTenantRepository:
-    """Async psycopg, one short read-only connection per call (pooling can come in M3)."""
+    """Async psycopg, one short read-only connection per call (pooling can come in M3).
 
-    def __init__(self, settings: Settings, tenant_id: str) -> None:
+    `password` is the reader password of this tenant (`tenant_db.credentials`, M5b AC9).
+    None leaves it to libpq (`PGPASSWORD`), as the local tests do."""
+
+    def __init__(
+        self, settings: Settings, tenant_id: str, password: SecretStr | None = None
+    ) -> None:
         self._dsn = tenant_dsn(settings, tenant_id)
+        self._password = password
         self.tenant_id = tenant_id
 
     async def field_schema(self, doc_type: str) -> DocTypeSchema:
@@ -105,8 +113,11 @@ class PostgresTenantRepository:
         start = time.perf_counter()
         status = "error"
         try:
+            extra: dict[str, Any] = {}
+            if self._password is not None:  # a keyword, so it is never in the DSN string
+                extra["password"] = self._password.get_secret_value()
             async with await psycopg.AsyncConnection.connect(
-                self._dsn, row_factory=dict_row
+                self._dsn, row_factory=dict_row, **extra
             ) as conn:
                 await conn.set_read_only(True)
                 async with conn.cursor() as cur:

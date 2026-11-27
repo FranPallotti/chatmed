@@ -116,6 +116,9 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
   20 sessions each running OCR, ≈ 11 GB. Measured in the image (2 vCPU, 4 GiB limit): three
   concurrent scans of the CIOMS fixture, largest Tesseract child 219 MB, Python peak 219 MB,
   6.5 s. With typical documents (text and facts < 1 MB) the total is ≈ 1.2 GB.
+  **Azure `demo` profile (M5b, D17):** 1 vCPU / 2 GiB (2048 MB) with `MAX_SESSIONS=3` and
+  `OCR_MAX_CONCURRENCY=1`, other defaults unchanged: 3 × (128 + 100 + 60) + 1 × 299 + 200 =
+  1363 MB, headroom 685 MB. The `rated` profile is the table above (2 vCPU / 4 GiB, 8 and 2).
   The sizing holds while the defaults hold: raising `MAX_SESSIONS`, `MAX_UPLOAD_MB`,
   `DUCKDB_MEMORY_LIMIT`, `OCR_MAX_CONCURRENCY` or `OCR_DPI` needs this table redone.
 
@@ -141,6 +144,11 @@ Everything inside the session lives in process memory and is wiped on close/TTL.
   Fixed parameterized queries, connections set read-only. Methods: `field_schema(doc_type)`,
   `subject_ids()`, `subject(subjid)`, `adverse_events(subjid, serious_only)`.
   psycopg's async driver needs a selector event loop on Windows.
+- Reader passwords (M5b, D17): `chatmed.tenant_db.credentials` reads one per allowed tenant at
+  startup, `PGPASSWORD_<TENANT>` (Azure: Container Apps secret referencing Key Vault
+  `pg-reader-<tenant>`) else the shared `PGPASSWORD` (local); none → startup fails with
+  `MissingTenantPassword` (variable names only). The repository passes the session tenant's
+  password to psycopg as a keyword (`SecretStr`, never in the DSN).
 - Agent tools are parameterized queries for main paths.
 - Restricted SQL tool (optional): SELECT only, allow-listed tables/views, tenant filter enforced,
   row limit, timeout. Parsed/validated before execution (e.g. `sqlglot`).
@@ -296,6 +304,22 @@ Local (M5a): `docker compose up -d --build` runs Postgres and the app image (Deb
 Python 3.12, Tesseract 5.5 from the distro, non-root, read-only filesystem, 2 CPUs / 4 GiB);
 `.env` and `db/.env` are passed as environment at run time and never enter the image
 (`.dockerignore` is an allow-list). `scripts/smoke_demo.py` runs the demo flow against it.
-Azure (M5b): one Azure Container App (single replica) · Azure OpenAI deployment in a Foundry project ·
-PostgreSQL with synthetic tenants · Managed Identity · Key Vault for the HMAC secret ·
-Application Insights (metadata only).
+Azure (M5b, D17, `infra/`, `docs/deploy.md`): `rg-chatmed-dev` in eastus2, from Bicep.
+
+```
+developer IP ──HTTPS only (IP allow-list)──► Container App ca-chatmed (0–1 replica, demo 1 vCPU/2 GiB
+                                             or rated 2 vCPU/4 GiB,
+                                             image by digest from ACR, user-assigned identity)
+                                               │ AcrPull ─► Container Registry (Basic, no admin)
+                                               │ Secrets User ─► Key Vault (RBAC): pg-reader-<tenant>
+                                               │ OpenAI User ─► Foundry resource (Azure OpenAI)
+                                               │ TLS verify-full, per-tenant reader role + password
+                                               ▼
+                                             PostgreSQL Flexible B1ms v17: tenant_acme, tenant_globex
+logs/telemetry (metadata only) ─► Log Analytics + workspace-based App Insights
+```
+
+The Postgres admin password is generated in the deployment and kept in Key Vault (`pg-admin`);
+the seed script (developer's machine, psql in Docker) creates each tenant's database and role
+with a random password written straight to Key Vault. Public Postgres endpoint with TLS and a
+firewall of Azure services + the developer IP (POC; private access in production, D17).

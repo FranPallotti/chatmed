@@ -38,8 +38,10 @@ ENV PYTHONUNBUFFERED=1 \
     PATH=/app/.venv/bin:$PATH \
     # Explicit, so tessdata discovery never depends on the binary's guess (M1b AC5).
     TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata
+# ca-certificates: explicit, because the Azure Postgres DSN verifies the server certificate
+# against /etc/ssl/certs/ca-certificates.crt (sslmode=verify-full, M5b, D17).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng ca-certificates \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
 RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin chatmed
 WORKDIR /app
