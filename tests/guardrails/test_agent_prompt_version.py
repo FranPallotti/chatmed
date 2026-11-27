@@ -27,6 +27,17 @@ PROMPT_HASHES = {
     # agent-v3: same text as v2, moved into chatmed.agent.prompt; whole module hashed
     # (now also covers the retry note).
     "agent-v3": "47318072bcbf3b167046d1e07bc83c7f9480e1bf02a110b863ce9ef3b0c328dd",
+    # agent-v4 (M5a): no quoted paraphrase of a status in the prompt; one line per
+    # reconciliation item with its status name (STATUS_EXAMPLE).
+    "agent-v4": "0dc277aa9a0695197c3f73aa087d9378feaf565cc1c027a1b9529656ec15c5b6",
+    # agent-v5 (M5a): cited_ids holds only row ids (never a bare document id).
+    "agent-v5": "a1d5098b752741806e6e1da0b073e636011fa90b98834f9eb38d068b5625fe82",
+    # agent-v6 (M5a): reconciliation answers start with reconcile_case's code-written
+    # statement (rules-10); STATUS_EXAMPLE removed.
+    "agent-v6": "e51fd56b5f0b9e0d9944b0ed7bce06e48c1afc4a3b02b0cb085492d41fcb509d",
+    # agent-v7 (M5a): reconciliation answers rendered by code (rules-11); the model only
+    # routes to reconcile_case. v6's statement sentence dropped; v5's cited_ids rule kept.
+    "agent-v7": "8be36dd47d68c9da3d631364f8ff1cf5c9ac33126a1c390512ccef0807c3f958",
 }
 
 

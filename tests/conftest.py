@@ -15,9 +15,33 @@ from chatmed.parsing.pdfium import page_texts
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "fixtures"
+# Tests never send telemetry anywhere, even when the developer's .env enables it
+# (scripts/check.py loads .env into the pytest environment). Telemetry tests inject fakes.
+os.environ.pop("APPLICATIONINSIGHTS_CONNECTION_STRING", None)
 # scripts/ is not a package; tests import the fixture generator from it (make_fixtures).
 sys.path.insert(0, str(ROOT / "scripts"))
 WINDOWS_DEFAULT = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+
+# The one list of tests that read repository files deliberately kept out of the Docker build
+# context (`.dockerignore` is an allow-list). In the image's test stage (CHATMED_IN_IMAGE=1,
+# set in the Dockerfile) they are skipped with this reason; on the host they always run.
+# Entries are a test module or one test; `test_host_only_list_is_current` keeps it honest.
+HOST_ONLY_TESTS: dict[str, str] = {
+    "tests/guardrails/test_container.py": "reads Dockerfile, .dockerignore, docker-compose.yml",
+    "tests/test_cioms_fixtures.py::test_fixture_case_matches_acme_seed": "reads db/seed",
+    "tests/guardrails/test_no_real_samples.py::test_samples_folder_is_gitignored": (
+        "reads .gitignore"
+    ),
+}
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if os.environ.get("CHATMED_IN_IMAGE") != "1":
+        return
+    for item in items:
+        for entry, why in HOST_ONLY_TESTS.items():
+            if item.nodeid == entry or item.nodeid.startswith(entry + "::"):
+                item.add_marker(pytest.mark.skip(reason=f"host only (not in the image): {why}"))
 
 
 def find_tesseract() -> str | None:

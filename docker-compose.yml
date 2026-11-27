@@ -1,6 +1,8 @@
-# Local tenant databases for development. Synthetic data only.
-# First time: copy db/.env.example to db/.env and set the passwords (db/.env is gitignored).
-# Start:  docker compose up -d      Reset: docker compose down -v && docker compose up -d
+# Local stack: tenant databases + the app (M5a AC3). Synthetic data only.
+# First time: copy db/.env.example to db/.env and .env.example to .env and fill them in
+# (both are gitignored and never copied into the image; they are passed as environment).
+# Start:  docker compose up -d --build      UI: http://localhost:8000
+# Reset:  docker compose down -v && docker compose up -d --build
 services:
   postgres:
     image: postgres:17
@@ -21,6 +23,34 @@ services:
       test: ["CMD-SHELL", "pg_isready -U chatmed_admin -d tenant_acme"]
       interval: 5s
       retries: 10
+
+  app:
+    build:
+      context: .
+      target: runtime   # never the test stage
+    image: chatmed:local
+    container_name: chatmed-app
+    env_file:
+      - .env      # model endpoint/deployment, limits; AZURE_CLIENT_* of the local SP (D16)
+      - db/.env   # PGPASSWORD for the tenant reader roles
+    environment:
+      # Overrides for inside the compose network (environment wins over env_file).
+      TENANT_DB_DSN_TEMPLATE: postgresql://chatmed_reader_{tenant}@postgres:5432/tenant_{tenant}
+      TESSERACT_CMD: ""   # the image's tesseract on PATH, not a host path from .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The 2 vCPU / 4 GiB target of the Azure container (M5a AC1).
+    cpus: 2
+    mem_limit: 4g
+    # Rule 1 belt and braces: the container filesystem is read-only, so nothing in the app
+    # (or a library) can write a file, temp or otherwise. No volumes are mounted.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   chatmed-pgdata:

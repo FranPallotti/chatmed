@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChatMed</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>ChatMed</h1>
+    <p class="note">Synthetic data only. Documents live in server memory for this session and
+      are wiped when you close it (or after the idle timeout).</p>
+  </header>
+
+  <main>
+    <section id="session-panel">
+      <h2>1. Session</h2>
+      <form id="session-form" autocomplete="off">
+        <label>Tenant <input id="tenant" name="tenant" required maxlength="64"
+          pattern="[a-z0-9_]+" placeholder="tenant id" spellcheck="false"></label>
+        <button type="submit" id="create-btn">Create session</button>
+      </form>
+      <p id="session-info" class="muted">No session.</p>
+      <button type="button" id="close-btn" class="danger" disabled>Close session (wipe)</button>
+    </section>
+
+    <section id="upload-panel">
+      <h2>2. Upload a PDF</h2>
+      <form id="upload-form" autocomplete="off">
+        <label>Document type <input id="doc-type" required maxlength="64" pattern="[a-z0-9_]+"
+          value="cioms" spellcheck="false"></label>
+        <label>PDF <input id="file" type="file" accept="application/pdf,.pdf" required></label>
+        <button type="submit" id="upload-btn" disabled>Upload</button>
+      </form>
+      <div id="documents"></div>
+    </section>
+
+    <section id="ask-panel">
+      <h2>3. Ask</h2>
+      <form id="ask-form" autocomplete="off">
+        <textarea id="question" rows="3" maxlength="2000" required
+          placeholder="e.g. Was the patient hospitalised?"></textarea>
+        <button type="submit" id="ask-btn" disabled>Ask</button>
+      </form>
+      <ol id="progress" class="progress"></ol>
+      <div id="answer"></div>
+    </section>
+  </main>
+
+  <p id="error" class="error" role="alert" hidden></p>
+</body>
+</html>

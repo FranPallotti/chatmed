@@ -24,8 +24,9 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+from azure.core.exceptions import ClientAuthenticationError
 
-from chatmed.agent import Answer, ToolContext, run_agent
+from chatmed.agent import AgentError, Answer, ToolContext, run_agent
 from chatmed.config import Settings
 from chatmed.extraction import (
     ExtractionError,
@@ -196,6 +197,9 @@ async def _ingest_locked(
             raise PipelineError("unknown_document_type", 422) from None
         except ExtractionError:
             raise PipelineError("extraction_failed", 502) from None
+        except ClientAuthenticationError:
+            _log_model_auth_failed(session)
+            raise PipelineError("model_auth_failed", 503) from None
         stored = StoredDocument(doc, doc_type, result.fingerprint)
         _store_document(services, session.id, stored, result.facts)
     log.info(
@@ -250,6 +254,19 @@ def _store_document(
     store.put_document(session_id, stored)
 
 
+def _log_model_auth_failed(session: Session) -> None:
+    """No Entra token for the model (e.g. the local service principal's secret expired,
+    D16). Logged as metadata only: the SDK's message is not ours to vouch for (rule 2)."""
+    log.error(
+        "pipeline.model_auth_failed",
+        extra={
+            "session_id": session.id,
+            "tenant_id": session.tenant_id,
+            "error_type": "ClientAuthenticationError",
+        },
+    )
+
+
 # ---------------------------------------------------------------- ask
 
 
@@ -283,9 +300,13 @@ async def _answer_locked(
             fulltext_max_chars=s.agent_fulltext_max_chars,
             bm25_top_k=s.agent_bm25_top_k,
         )
-        return await run_agent(
-            services.model_client, session, ctx, question, settings=s, on_event=on_event
-        )
+        try:
+            return await run_agent(
+                services.model_client, session, ctx, question, settings=s, on_event=on_event
+            )
+        except ClientAuthenticationError:
+            _log_model_auth_failed(session)
+            raise AgentError("model_auth_failed") from None
 
 
 # ---------------------------------------------------------------- whole session

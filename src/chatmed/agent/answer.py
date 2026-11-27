@@ -7,6 +7,9 @@ The model ends with `{text, cited_ids, quotes}` (strict JSON, `prompt.ANSWER_SCH
 4. rejects text that cites a fact with an honesty status (`undeterminable`, `conflict`, ...)
    without stating that status, so a status is never papered over (AC4).
 A rejected answer is retried once by the loop; after that, `fallback_answer` is returned.
+
+Reconciliation answers are not written by the model (D14, agent-v7): once the model
+has called `reconcile_case`, `render_reconciliation` writes the answer from its rows.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from chatmed.agent.reconcile import ITEMS
 from chatmed.agent.tools import SHA_PREFIX, EvidenceItem, ToolContext
 from chatmed.extraction import PageLines, ground_quote
 
@@ -303,6 +307,45 @@ def verify(ctx: ToolContext, output: dict[str, Any]) -> Answer:
     if unstated_statuses(text, items):
         raise AnswerRejected("status_not_stated")
     return Answer(text=text, facts_used=[it.as_dict() for it in items], verified=True)
+
+
+RECONCILIATION_HEADER = "Reconciliation with the study ADAE record, item by item:"
+# Last line of every rendered reconciliation: the answer never covers the rest of a combined
+# question ("does it match ADAE, and what arm?"), so it says so instead of staying silent.
+RECONCILIATION_SCOPE = (
+    "This answer covers only the comparison with the study database; ask anything else as a "
+    "separate question."
+)
+
+
+def _recon_line(item: EvidenceItem) -> str:
+    """`Onset date: not comparable (conflict).` Status name and reason code, no values."""
+    name = str(item.values["item"]).replace("_", " ").capitalize()
+    line = f"{name}: {str(item.values['status']).replace('_', ' ')}"
+    reason = item.values.get("reason")
+    return line + (f" ({str(reason).replace('_', ' ')})." if reason else ".")
+
+
+def render_reconciliation(ctx: ToolContext, doc: str) -> Answer:
+    """The reconciliation answer for document `doc` (sha prefix), written by code (D14).
+
+    The real model kept rewording statuses ("cannot be compared") and describing a
+    `conflict` reason instead of naming it, whatever the prompt said (agent-v3..v6), so its
+    first answer was rejected. Here the model only routes the question to `reconcile_case`;
+    the text is one line per item, in `ITEMS` order, with its status name and reason code,
+    then `RECONCILIATION_SCOPE` (the answer covers nothing else the question asked), and
+    the answer cites every item (and, through `expand_citations`, the adae record and the
+    joined subject fact). No values in the text, so there is no number to check. It still
+    goes through `verify`: a unit row with a status the text does not state (e.g. a subject
+    fact) gives the fallback, never an unchecked answer.
+    """
+    rows = [ctx.evidence[k] for i in ITEMS if (k := f"recon:{doc}:{i}") in ctx.evidence]
+    lines = [RECONCILIATION_HEADER, *(_recon_line(r) for r in rows), RECONCILIATION_SCOPE]
+    text = "\n".join(lines)
+    try:
+        return verify(ctx, {"text": text, "cited_ids": [r.id for r in rows], "quotes": []})
+    except AnswerRejected as exc:
+        return fallback_answer(ctx, exc.code)
 
 
 def _describe(item: EvidenceItem) -> str:

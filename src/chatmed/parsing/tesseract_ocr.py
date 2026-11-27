@@ -3,6 +3,10 @@
 Tesseract runs as a subprocess with the page image on stdin and the text on stdout, so
 neither the image nor the text is written to a file by us (`pytesseract` uses temp files; D11).
 Its stderr is discarded and never logged or raised, in case it echoes content (hard rule 2).
+
+At most `max_concurrency` pages are rendered and OCRed at once across the whole process
+(`OCR_MAX_CONCURRENCY`, M5a AC1): each Tesseract process peaks near 290 MB (D10), so the cap
+is what keeps the container inside its memory budget (architecture.md). Extra pages queue.
 """
 
 from __future__ import annotations
@@ -101,11 +105,17 @@ def language_data_sha256(tessdata_dir: Path, langs: list[str]) -> str:
 class TesseractOcrParser:
     """OCRs every page of the PDF it is given (RoutingParser sends it only scanned pages)."""
 
-    def __init__(self, *, dpi: int, lang: str, cmd: str | None = None) -> None:
+    def __init__(
+        self, *, dpi: int, lang: str, cmd: str | None = None, max_concurrency: int = 2
+    ) -> None:
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency must be at least 1")
         self.dpi = dpi
         self.lang = lang
         self.cmd = cmd or shutil.which("tesseract")
         self.install: TesseractInstall | None = None
+        # One parser per process (build_parser), so this bounds OCR across all sessions.
+        self._slots = asyncio.Semaphore(max_concurrency)
 
     @property
     def parser_id(self) -> str:
@@ -144,10 +154,14 @@ class TesseractOcrParser:
         await self.ensure_available()
         count = await asyncio.to_thread(page_count, pdf_bytes)
         texts = []
-        for index in range(count):  # sequential: stable order, bounded memory
-            image = await asyncio.to_thread(render_page_pgm, pdf_bytes, index, self.dpi)
-            args = ["stdin", "stdout", "-l", self.lang, "--dpi", str(self.dpi), "--psm", str(PSM)]
-            texts.append(normalize_text(_decode_ocr(await self._run(args, image))))
+        args = ["stdin", "stdout", "-l", self.lang, "--dpi", str(self.dpi), "--psm", str(PSM)]
+        for index in range(count):  # sequential within a document: stable order
+            # The slot covers the page image as well as the process, so both are bounded.
+            async with self._slots:
+                image = await asyncio.to_thread(render_page_pgm, pdf_bytes, index, self.dpi)
+                raw = await self._run(args, image)
+                del image
+            texts.append(normalize_text(_decode_ocr(raw)))
         return make_document(pdf_bytes, texts, self.parser_id)
 
     async def _run(self, args: list[str], stdin: bytes, *, merge_stderr: bool = False) -> bytes:

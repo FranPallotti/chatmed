@@ -163,10 +163,13 @@ stack locally in containers; **M5b** deploys it to Azure.
   would add server state and upload handling outside our control): pick tenant, upload PDF, ask,
   see progress events, the verified answer with `facts_used` and citations, statuses
   (`undeterminable`, `conflict`, `not_comparable`…) visibly marked, and a Close session button.
-- AC5 Telemetry: Application Insights via `azure-monitor-opentelemetry`, enabled only when
-  `APPLICATIONINSIGHTS_CONNECTION_STRING` is set. The metadata-only filter applies to the exporter
-  too (test: a fake exporter receives only whitelisted fields); no request/response body capture;
-  no prompt/completion capture by any instrumentation.
+- AC5 Telemetry: Application Insights via `azure-monitor-opentelemetry-exporter` and
+  `opentelemetry-instrumentation-fastapi` only (not the `azure-monitor-opentelemetry` distro,
+  D16), enabled only when `APPLICATIONINSIGHTS_CONNECTION_STRING` is set. The metadata-only filter
+  applies to the exporter too (test: a fake exporter receives only whitelisted fields); no
+  request/response body capture; no prompt/completion capture by any instrumentation; an
+  exception containing document text never reaches the span exporter (events, status
+  description, URL).
 
 ### M5b — Azure deployment
 - AC6 Infra as code (Bicep) in `infra/`: Azure Container Registry; Log Analytics + App Insights;

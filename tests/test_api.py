@@ -303,3 +303,60 @@ def test_fallback_answer_event_has_outcome_and_reason_but_no_fingerprint(
         ]
     assert (answer["outcome"], answer["reason"]) == ("fallback", "unknown_cited_id")
     assert answer["fingerprint"] is None
+
+
+# ---------------------------------------------------------------- M5a: model auth failures
+
+
+class _NoTokenClient:
+    """A model client whose Entra token cannot be obtained (e.g. an expired SP secret)."""
+
+    def __init__(self) -> None:
+        self.chat = self
+        self.completions = self
+
+    async def create(self, **_kwargs: Any) -> Any:
+        from azure.core.exceptions import ClientAuthenticationError
+
+        raise ClientAuthenticationError(f"token request failed: {MARKERS[1]} {MARKERS[0]}")
+
+
+def _no_token_app() -> TestClient:
+    s = make_settings()
+    services = Services(
+        settings=s,
+        store=InMemorySessionStore(max_docs=5, duckdb_memory_limit="256MB"),
+        parser=PdfiumParser(),
+        model_client=_NoTokenClient(),
+        repo_factory=FakeTenantRepository,
+    )
+    return TestClient(create_app(services=services, configure=False))
+
+
+def test_model_auth_failure_on_upload_is_503_with_a_fixed_code(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    with _no_token_app() as client:
+        resp = upload(client, new_session(client))
+    assert (resp.status_code, resp.json()) == (503, {"detail": "model_auth_failed"})
+    (record,) = [r for r in caplog.records if r.msg == "pipeline.model_auth_failed"]
+    assert record.levelno == logging.ERROR and record.exc_info is None
+    assert record.__dict__["error_type"] == "ClientAuthenticationError"
+    assert not any(m in caplog.text for m in MARKERS)
+    assert not any(r.msg == "api.unhandled_error" for r in caplog.records)
+
+
+def test_model_auth_failure_on_ask_is_an_error_event(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO)
+    with _no_token_app() as client:
+        sid = new_session(client)
+        resp = client.post(f"/sessions/{sid}/ask", json={"question": "Arm?"})
+        assert events(resp) == [
+            {"event": "started"},
+            {"event": "error", "code": "model_auth_failed"},
+        ]
+        assert client.get("/healthz").status_code == 200
+        assert upload(client, sid).status_code == 503  # session still open, same code
+    assert any(r.msg == "pipeline.model_auth_failed" for r in caplog.records)
+    assert not any(m in caplog.text for m in MARKERS)

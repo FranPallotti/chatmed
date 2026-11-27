@@ -13,7 +13,7 @@ from functools import lru_cache
 from typing import Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 TENANT_PLACEHOLDER = "{tenant}"
@@ -60,12 +60,15 @@ class Settings(BaseSettings):
     ocr_dpi: int = Field(default=300, ge=72, le=600)
     ocr_lang: str = Field(default="eng", pattern=r"^[a-z_]{3,}(\+[a-z_]{3,})*$")
     tesseract_cmd: str | None = None  # None/empty: find `tesseract` on PATH
+    # Pages OCRed at once across all sessions (M5a AC1); each Tesseract peaks near 290 MB
+    ocr_max_concurrency: int = Field(default=2, ge=1, le=16)
 
     # Session (only the in-memory store exists; encrypted_blob is a stretch goal)
     session_store: Literal["memory"] = "memory"
     session_ttl_seconds: int = Field(default=1800, gt=0)  # idle time before the wipe (D15)
     session_sweep_interval_seconds: float = Field(default=60.0, gt=0)  # TTL sweeper period
-    max_sessions: int = Field(default=20, gt=0)  # open sessions at once; bounds memory (M4 AC3)
+    # open sessions at once; bounds memory (M4 AC3). 8 fits 4 GiB (M5a AC1, architecture.md)
+    max_sessions: int = Field(default=8, gt=0)
     max_docs_per_session: int = Field(default=5, gt=0)
     max_pages_per_doc: int = Field(default=30, gt=0)
     max_upload_mb: int = Field(default=20, gt=0)
@@ -78,6 +81,9 @@ class Settings(BaseSettings):
     tenants: str = "acme,globex"  # comma-separated allow-list (D13a); see `tenant_ids`
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    # Application Insights (M5a AC5): unset or empty = telemetry off. SecretStr so it never
+    # shows up in a repr of the settings.
+    applicationinsights_connection_string: SecretStr | None = None
 
     @property
     def tenant_ids(self) -> frozenset[str]:
@@ -145,6 +151,7 @@ OPERATIONAL_SETTINGS: frozenset[str] = frozenset(
         "agent_question_timeout_seconds",
         "docintel_endpoint",  # which resource; the model id is fixed and in parser_id
         "tesseract_cmd",  # where the binary is; its version is in parser_id
+        "ocr_max_concurrency",  # when pages are OCRed, never their order or text
         "session_store",
         "session_ttl_seconds",
         "session_sweep_interval_seconds",
@@ -155,6 +162,7 @@ OPERATIONAL_SETTINGS: frozenset[str] = frozenset(
         "duckdb_memory_limit",  # no spill to disk: over the limit a query fails
         "tenants",  # allow-list (admission)
         "log_level",
+        "applicationinsights_connection_string",  # where metadata telemetry goes
     }
 )
 
