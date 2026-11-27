@@ -172,21 +172,46 @@ stack locally in containers; **M5b** deploys it to Azure.
   description, URL).
 
 ### M5b — Azure deployment
-- AC6 Infra as code (Bicep) in `infra/`: Azure Container Registry; Log Analytics + App Insights;
-  Container Apps environment (Consumption-only) and the app with **min = max = 1 replica** (sessions
-  are in memory, D5), 2 vCPU / 4 GiB; a user-assigned managed identity with only `AcrPull` and
-  `Cognitive Services OpenAI User` on the existing Foundry resource; Key Vault for the per-tenant
-  reader passwords; Azure Database for PostgreSQL Flexible Server (smallest Burstable tier).
-  Parameters for names; nothing secret in the templates.
-- AC7 Database in Azure: the same schema and seeds (`db/`) applied by a script run from the
-  developer's machine; per-tenant reader roles exactly as locally. Passwords live in Key Vault and
-  reach the app as Container Apps secrets via the managed identity. Record in a new decision why
-  this POC uses passwords from Key Vault instead of Entra auth per tenant, and the production path.
-- AC8 Access: the public endpoint is restricted (Container Apps ingress IP allow-list, HTTPS only),
-  so nobody else can upload files or spend model tokens. The tenant still comes from the request
-  (D14); the Entra token mapping stays documented as the production step.
-- AC9 `docs/deploy.md`: deploy, update and **delete** (`az group delete`) in a few commands, the
-  budget alert, and how to check that the app's logs contain only metadata.
+Same image as M5a, in `rg-chatmed-dev` (eastus2, next to the Foundry resource), built from Bicep in
+`infra/`. Order: base resources → seed the database → build the image → create the app → verify.
+The agent writes templates, scripts and docs; the developer runs the `az` commands (their login).
+Record the decisions below as D17.
+- AC6 Infra as code (Bicep, parameters for every name, nothing secret in templates or params files):
+  Container Registry (Basic, admin user disabled); Log Analytics + workspace-based App Insights;
+  Key Vault (RBAC mode); a **user-assigned** managed identity created before the app; Container
+  Apps environment (Consumption-only) and the app with **min = max = 1 replica** (in-memory sessions,
+  D5; always on so the demo never waits for a cold start), 2 vCPU / 4 GiB; Azure Database for
+  PostgreSQL Flexible Server, smallest Burstable tier, version 17.
+- AC7 Least privilege: the identity gets exactly `AcrPull` (registry), `Key Vault Secrets User`
+  (vault) and `Cognitive Services OpenAI User` (Foundry resource). The developer gets
+  `Key Vault Secrets Officer` on the vault, only to write the generated passwords. No registry
+  admin, no API keys, no service principal secret in Azure.
+- AC8 Database networking (POC): public endpoint, TLS required, firewall = Azure services + the
+  developer's IP (parameter; needed for seeding). Per-tenant read-only roles as locally. D17 states
+  the weak point (any Azure resource can attempt a connection; stopped by per-tenant roles and
+  random passwords) and the production path (VNet-integrated environment + private access).
+- AC9 Per-tenant passwords: the seed script generates one random password per tenant reader, writes
+  it straight to Key Vault (`pg-reader-<tenant>`) and uses it, without printing it. The app picks the
+  password of the session's tenant (`PGPASSWORD_<TENANT>` env vars, each a Container Apps secret
+  referencing Key Vault through the identity), consistent with how it picks the role and database.
+  Locally the shared `PGPASSWORD` keeps working. Tests: right password per tenant; a missing
+  tenant password fails clearly at startup.
+- AC10 Seeding from the developer's machine: the same `db/schema` and `db/seed` files, applied with
+  `psql` from the `postgres:17` Docker image (nothing new to install on Windows) over TLS by a
+  script (PowerShell) that reads the admin password from Key Vault and never
+  echoes secrets. Idempotent or with a clear "already seeded" stop.
+- AC11 Image: built in the cloud with `az acr build`, tagged with the git commit; the app references
+  the image **digest**, so the deployed image is exactly the one that was tested. Record the digest
+  in the deploy output.
+- AC12 Access: ingress external, HTTPS only, IP allow-list with the developer's IP (parameter);
+  everything else rejected before the app. `deploy.md` has the one command to update the IP. The
+  tenant still comes from the request (D14); Entra login + tenant claim is the production step.
+- AC13 Verification in Azure: `smoke_demo.py --base-url <app URL> --tenant acme --require-verified`
+  passes; a KQL query in `deploy.md` shows the app's logs contain only metadata events; the
+  file check (`find / -xdev -newer /app -type f`) via `az containerapp exec` shows no app writes.
+- AC14 `docs/deploy.md`: prerequisites, deploy, update (new image), update IP, verify, and
+  **delete** (`az group delete -n rg-chatmed-dev`, plus deleting the local service principal), the
+  budget alert, and expected monthly cost of the chosen tiers (from the Azure pricing pages, dated).
 
 ### M5c — Demo and wrap-up
 - AC10 `docs/demo.md`, a 10-minute script on synthetic data: create an acme session → upload the
